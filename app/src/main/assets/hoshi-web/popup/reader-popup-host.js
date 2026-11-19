@@ -191,6 +191,7 @@
     }
 
     function setContentReady(record, ready) {
+        if (!ready) record.revealSignalled = false;
         record.contentReady = ready;
         record.shell.dataset.contentReady = String(ready);
         syncRootReveal();
@@ -629,7 +630,13 @@
         }
         const rootRecord = activeRootRecord();
         for (const record of frames.values()) {
-            setRevealReady(record, !rootHighlightBlocksReveal(record));
+            const revealReady = !rootHighlightBlocksReveal(record);
+            setRevealReady(record, revealReady);
+            if (record.contentReady && revealReady && !record.revealSignalled) {
+                record.revealSignalled = true;
+                record.iframe.contentWindow?.postMessage({ type: 'popupRevealed' }, ORIGIN);
+                if (record.payload?.id) postNative({ name: 'popupRevealed', id: null, popupId: record.payload.id, body: null });
+            }
         }
         const highlightVisible = !!rootHighlight &&
             !rootHighlight.pending &&

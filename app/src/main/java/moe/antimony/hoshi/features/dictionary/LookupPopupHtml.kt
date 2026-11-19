@@ -319,6 +319,10 @@ internal object LookupPopupHtml {
                                 window.hoshiSelection?.clearSelection();
                                 return;
                             }
+                            if (message.type === 'popupRevealed') {
+                                window.hoshiPopupRevealed?.();
+                                return;
+                            }
                             if (message.type === 'resetPopup') {
                                 window.popupId = null;
                                 closeOverlay();
@@ -328,6 +332,8 @@ internal object LookupPopupHtml {
                                 return;
                             }
                             if (message.type === 'renderPopup') {
+                                // The host that sends this message posts 'popupRevealed' once the popup is shown.
+                                window.hoshiPopupHostSignalsReveal = true;
                                 window.popupId = message.popupId || null;
                                 closeOverlay();
                                 window.entryCount = message.entriesCount || 0;

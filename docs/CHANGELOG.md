@@ -5,6 +5,10 @@ Release notes before v1.3.0 are in [CHANGELOG_ARCHIVE.md](CHANGELOG_ARCHIVE.md).
 
 ## [Unreleased]
 
+### Changed
+
+- Open in-book dictionary popups sooner after a tap.
+
 ## [v1.5.0] - 2026-11-10
 
 ### Added

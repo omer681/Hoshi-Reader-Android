@@ -513,6 +513,7 @@ private fun ProcessTextLookupOverlay(
                     }
                 }
                 is ReaderLookupPopupBridgeMessage.ContentReady,
+                is ReaderLookupPopupBridgeMessage.PopupRevealed,
                 is ReaderLookupPopupBridgeMessage.ScrollState,
                 is ReaderLookupPopupBridgeMessage.SasayakiReplayCue,
                 is ReaderLookupPopupBridgeMessage.SasayakiTogglePlayback,

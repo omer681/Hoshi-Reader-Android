@@ -2708,6 +2708,23 @@ function installPopupDocumentTapHandlers() {
 
 installPopupDocumentTapHandlers();
 
+// Set by the host page's 'popupRevealed' message.
+let resolvePopupRevealed = null;
+window.hoshiPopupRevealed = () => {
+    resolvePopupRevealed?.();
+    resolvePopupRevealed = null;
+};
+
+// Resolves once the host has revealed the popup and one more frame has been painted, or after a
+// timeout. It waits on a message and timers, not animation frames: while the popup keeps requesting
+// frames, the browser runs them ahead of the queued message that tells the host the content is ready.
+function popupShown(timeoutMs = 250) {
+    return new Promise(resolve => {
+        resolvePopupRevealed = resolve;
+        setTimeout(resolve, timeoutMs);
+    }).then(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
+}
+
 window.renderPopup = function() {
     const container = document.getElementById('entries-container');
     if (!window.entryCount) {
@@ -2746,8 +2763,12 @@ window.renderPopup = function() {
 
             container.appendChild(entryDiv);
             popupTermNavigator.entryRendered();
-            await new Promise(r => requestAnimationFrame(r));
-            if (generation !== renderGeneration) return;
+            // The first entry's first glossary makes the popup ready to show. A frame can be a long
+            // wait while the host app is busy, so only later entries yield before their glossaries.
+            if (idx > 0) {
+                await new Promise(r => requestAnimationFrame(r));
+                if (generation !== renderGeneration) return;
+            }
 
             const grouped = {};
             entry.glossaries.forEach(g => {
@@ -2762,7 +2783,12 @@ window.renderPopup = function() {
             for (let dictIdx = 0; dictIdx < dictNames.length; dictIdx++) {
                 entryDiv.appendChild(createGlossarySection(dictNames[dictIdx], grouped[dictNames[dictIdx]], dictIdx === 0, idx));
                 applyHoshiPopupThemeOverrides(entryDiv);
-                await new Promise(r => requestAnimationFrame(r));
+                if (idx === 0 && dictIdx === 0 && window.hoshiPopupHostSignalsReveal) {
+                    // The popup can be revealed now, so the remaining sections wait until it is on screen.
+                    await popupShown();
+                } else {
+                    await new Promise(r => requestAnimationFrame(r));
+                }
                 if (generation !== renderGeneration) return;
             }
         }

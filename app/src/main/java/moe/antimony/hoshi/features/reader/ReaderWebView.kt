@@ -28,6 +28,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -333,6 +334,7 @@ fun ReaderWebView(
     val lookupPopups = stateHolder.lookupPopups
     var readerPopupHistories by remember { mutableStateOf<Map<String, ReaderPopupHistoryCounts>>(emptyMap()) }
     var rootSelectionHighlight by remember { mutableStateOf<ReaderRootSelectionHighlight?>(null) }
+    val lookupPopupDirectSync = remember { ReaderLookupPopupDirectSync() }
     var fullscreenImage by remember { mutableStateOf<ReaderFullscreenImage?>(null) }
     val ankiViewModel: AnkiViewModel = hiltViewModel()
     val ankiUiState by ankiViewModel.uiState.collectAsStateWithLifecycle()
@@ -408,6 +410,13 @@ fun ReaderWebView(
             iframeDocument = { currentReaderPopupIframeDocument.value },
         )
     }
+    fun withPopupVisualOptions(popups: List<LookupPopupItem>): List<LookupPopupItem> =
+        popups.withLookupPopupVisualOptions(
+            darkMode = popupDarkMode,
+            eInkMode = effectiveSettings.eInkMode,
+            audioSettings = audioSettings,
+            popupScale = effectiveSettings.popupScale,
+        )
     val themedLookupPopups = remember(
         lookupPopups,
         popupDarkMode,
@@ -415,12 +424,7 @@ fun ReaderWebView(
         audioSettings,
         effectiveSettings.popupScale,
     ) {
-        lookupPopups.withLookupPopupVisualOptions(
-            darkMode = popupDarkMode,
-            eInkMode = effectiveSettings.eInkMode,
-            audioSettings = audioSettings,
-            popupScale = effectiveSettings.popupScale,
-        )
+        withPopupVisualOptions(lookupPopups)
     }
     val showReaderMenu = stateHolder.showReaderMenu
     val showAppearance = stateHolder.showAppearance
@@ -746,12 +750,16 @@ fun ReaderWebView(
         }
     }
     fun setLookupPopups(nextPopups: List<LookupPopupItem>) {
+        val supersededPending = lookupPopupDirectSync.pending != null
+        lookupPopupDirectSync.pending = null
         val activeIds = nextPopups.mapTo(mutableSetOf()) { it.id }
         readerPopupHistories = readerPopupHistories.filterKeys(activeIds::contains)
         rootSelectionHighlight = rootSelectionHighlight?.takeIf { highlight ->
             highlight.popupId == null || highlight.popupId in activeIds
         }
         stateHolder.updateLookupPopups(nextPopups)
+        // The page was shown a popup that never reached the screen state, so it gets the real stack back.
+        if (supersededPending) lookupPopupDirectSync.send(webView, nextPopups, rootSelectionHighlight)
     }
     fun dismissRootLookupPopup() {
         rootSelectionHighlight = null
@@ -948,7 +956,14 @@ fun ReaderWebView(
 
     fun popupById(popupId: String): LookupPopupItem? =
         stateHolder.lookupPopups.firstOrNull { it.id == popupId }
+            ?: lookupPopupDirectSync.pending?.popup?.takeIf { it.id == popupId }
 
+    fun commitPendingRootLookup(pending: PendingRootLookup) {
+        if (lookupPopupDirectSync.pending !== pending) return
+        lookupPopupDirectSync.pending = null
+        rootSelectionHighlight = pending.highlight
+        setLookupPopups(listOf(pending.popup))
+    }
     fun handleReaderPopupBridgeMessage(message: ReaderLookupPopupBridgeMessage) {
         when (message) {
             is ReaderLookupPopupBridgeMessage.OpenLink -> context.openPopupExternalLink(message.url)
@@ -1119,6 +1134,12 @@ fun ReaderWebView(
                 }
             }
             is ReaderLookupPopupBridgeMessage.ContentReady -> Unit
+            is ReaderLookupPopupBridgeMessage.PopupRevealed -> {
+                // The screen state catches up once the popup's first frame is drawn, so rebuilding
+                // the screen does not compete with drawing it.
+                val pending = lookupPopupDirectSync.pending?.takeIf { it.popup.id == message.popupId } ?: return
+                webView?.afterCurrentContentDrawn { commitPendingRootLookup(pending) }
+            }
             is ReaderLookupPopupBridgeMessage.TtsReplaySentence,
             is ReaderLookupPopupBridgeMessage.TtsTogglePlayback,
             is ReaderLookupPopupBridgeMessage.TtsPlayForward -> {
@@ -1170,42 +1191,41 @@ fun ReaderWebView(
     val handleTextSelected: (ReaderSelectionData, (Int, (List<ReaderSelectionRect>) -> Unit) -> Unit) -> Unit = { selection, selectionRects ->
         cancelReaderAutoPage()
         stateHolder.enterFocusModeForReaderInteraction()
-        rootSelectionHighlight = null
         val lookup = lookupRootPopup(selection)
         if (lookup != null) {
             val (popup, highlightCount) = lookup
             pauseNarrationForLookupIfNeeded()
             val selectionCount = onTextSelected(selection) ?: highlightCount
-            rootSelectionHighlight = ReaderRootSelectionHighlight(
-                popupId = popup.id,
-                rects = null,
-            )
-            setLookupPopups(listOf(popup))
+            // The page gets the popup right away. Updating the screen state rebuilds the reader screen,
+            // which keeps the main thread busy and delays the popup, so the state follows once the
+            // page reports the popup as revealed.
+            val pending = PendingRootLookup(popup, ReaderRootSelectionHighlight(popupId = popup.id, rects = null))
+            lookupPopupDirectSync.pending = pending
+            lookupPopupDirectSync.send(webView, listOf(pending.popup), pending.highlight)
+            webView?.postDelayed({ commitPendingRootLookup(pending) }, pendingRootLookupSafetyMillis)
             selectionRects(selectionCount) { rects ->
-                if (stateHolder.lookupPopups.none { it.id == popup.id }) return@selectionRects
                 val displayRects = rects.ifEmpty { listOf(popup.state.selection.rect) }
-                val anchor = displayRects.firstOrNull()
-                if (anchor != null) {
-                    setLookupPopups(
-                        stateHolder.lookupPopups.map { existing ->
-                            if (existing.id == popup.id) {
-                                existing.copy(
-                                    state = existing.state.copy(
-                                        selection = existing.state.selection.copy(rect = anchor),
-                                    ),
-                                )
-                            } else {
-                                existing
-                            }
-                        },
-                    )
+                val anchor = displayRects.first()
+                val highlight = ReaderRootSelectionHighlight(popupId = popup.id, rects = displayRects)
+                fun anchored(existing: LookupPopupItem): LookupPopupItem =
+                    if (existing.id != popup.id) {
+                        existing
+                    } else {
+                        existing.copy(state = existing.state.copy(selection = existing.state.selection.copy(rect = anchor)))
+                    }
+                if (lookupPopupDirectSync.pending === pending) {
+                    // The page can reveal the popup now, and reports back when it has.
+                    pending.popup = anchored(popup)
+                    pending.highlight = highlight
+                    lookupPopupDirectSync.send(webView, listOf(pending.popup), highlight)
+                } else if (stateHolder.lookupPopups.any { it.id == popup.id }) {
+                    setLookupPopups(stateHolder.lookupPopups.map(::anchored))
+                    rootSelectionHighlight = highlight
+                    lookupPopupDirectSync.send(webView, stateHolder.lookupPopups, rootSelectionHighlight)
                 }
-                rootSelectionHighlight = ReaderRootSelectionHighlight(
-                    popupId = popup.id,
-                    rects = displayRects,
-                )
             }
         } else {
+            rootSelectionHighlight = null
             setLookupPopups(emptyList())
             onTextSelected(selection)?.let { count ->
                 selectionRects(count) { rects ->
@@ -2105,21 +2125,35 @@ fun ReaderWebView(
                     width = maxWidth.value.toDouble(),
                     height = maxHeight.value.toDouble(),
                 )
+                fun rootHighlightPayload(highlight: ReaderRootSelectionHighlight?) = highlight?.let {
+                    ReaderLookupPopupRootHighlightPayload.fromReaderRects(
+                        popupId = it.popupId,
+                        rects = it.rects,
+                        darkMode = popupDarkMode,
+                        eInkMode = effectiveSettings.eInkMode,
+                        verticalWriting = effectiveSettings.verticalWriting,
+                    )
+                }
+                fun framePayloads(themedPopups: List<LookupPopupItem>, highlight: ReaderRootSelectionHighlight?) =
+                    readerLookupPopupFramePayloads(
+                        popups = themedPopups,
+                        histories = readerPopupHistories,
+                        viewport = readerLookupPopupViewport,
+                        sasayakiWasPaused = sasayakiWasPausedByLookup,
+                        sasayakiIsPlaying = sasayakiPlayer?.isPlaying == true,
+                        ttsAvailable = ttsAvailable && ttsState.canStart,
+                        ttsIsPlaying = ttsState.playing,
+                        ttsWasPaused = ttsLookupPause.pending,
+                        iframeUrl = readerPopupIframeUrl,
+                        rootSelectionHighlight = highlight,
+                    )
                 val readerRootSelectionHighlightPayload = remember(
                     rootSelectionHighlight,
                     popupDarkMode,
                     effectiveSettings.eInkMode,
                     effectiveSettings.verticalWriting,
                 ) {
-                    rootSelectionHighlight?.let { highlight ->
-                        ReaderLookupPopupRootHighlightPayload.fromReaderRects(
-                            popupId = highlight.popupId,
-                            rects = highlight.rects,
-                            darkMode = popupDarkMode,
-                            eInkMode = effectiveSettings.eInkMode,
-                            verticalWriting = effectiveSettings.verticalWriting,
-                        )
-                    }
+                    rootHighlightPayload(rootSelectionHighlight)
                 }
                 val readerLookupPopupPayloads = remember(
                     themedLookupPopups,
@@ -2131,18 +2165,7 @@ fun ReaderWebView(
                     readerPopupIframeUrl,
                     rootSelectionHighlight,
                 ) {
-                    readerLookupPopupFramePayloads(
-                        popups = themedLookupPopups,
-                        histories = readerPopupHistories,
-                        viewport = readerLookupPopupViewport,
-                        sasayakiWasPaused = sasayakiWasPausedByLookup,
-                        sasayakiIsPlaying = sasayakiPlayer?.isPlaying == true,
-                        ttsAvailable = ttsAvailable && ttsState.canStart,
-                        ttsIsPlaying = ttsState.playing,
-                        ttsWasPaused = ttsLookupPause.pending,
-                        iframeUrl = readerPopupIframeUrl,
-                        rootSelectionHighlight = rootSelectionHighlight,
-                    )
+                    framePayloads(themedLookupPopups, rootSelectionHighlight)
                 }
                 if (highlights != null) {
                     val loadChapter = currentLoadChapter()
@@ -2269,10 +2292,19 @@ fun ReaderWebView(
                         )
                     }
                 }
+                SideEffect {
+                    lookupPopupDirectSync.buildJson = { popups, highlight ->
+                        ReaderLookupPopupStackPayload(
+                            popups = framePayloads(withPopupVisualOptions(popups), highlight),
+                            rootHighlight = rootHighlightPayload(highlight),
+                        ).toJson()
+                    }
+                }
                 ReaderLookupPopupIframeSync(
                     webView = webView,
                     payloads = readerLookupPopupPayloads,
                     rootHighlight = readerRootSelectionHighlightPayload,
+                    directSync = lookupPopupDirectSync,
                 )
             }
         }

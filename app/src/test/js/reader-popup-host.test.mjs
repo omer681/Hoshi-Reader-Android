@@ -377,6 +377,35 @@ test('iframe render messages forward only non-null source text', () => {
     }
 });
 
+test('popup and app are told once when the popup is revealed, and again after its content is replaced', () => {
+    const scene = popupHost();
+    const nativeMessages = [];
+    scene.window.HoshiReaderPopup = { postMessage: message => nativeMessages.push(JSON.parse(message)) };
+    const popup = { ...rootPopupPayload(), entriesCount: 1, initialEntryJson: '{"expression":"猫"}', contentKey: 'first' };
+    const contentReady = { source: 'hoshi-popup-iframe', name: 'contentReady', popupId: 'root' };
+    scene.host.renderStack({ popups: [popup] });
+    const iframe = scene.document.getElementById('hoshi-reader-popup-layer').children[0].querySelector('.hoshi-reader-popup-iframe');
+    const messages = [];
+    iframe.contentWindow.postMessage = message => messages.push(message);
+    iframe.dispatchEvent('load');
+    const revealed = () => {
+        const toPopup = messages.filter(message => message.type === 'popupRevealed').length;
+        const toApp = nativeMessages.filter(message => message.name === 'popupRevealed' && message.popupId === 'root').length;
+        assert.equal(toApp, toPopup);
+        return toPopup;
+    };
+    assert.equal(revealed(), 0);
+    scene.dispatchMessage(contentReady);
+    scene.dispatchMessage(contentReady);
+    scene.host.renderStack({ popups: [popup] });
+    assert.equal(revealed(), 1);
+
+    scene.host.renderStack({ popups: [{ ...popup, initialEntryJson: '{"expression":"犬"}', contentKey: 'second' }] });
+    assert.equal(revealed(), 1);
+    scene.dispatchMessage(contentReady);
+    assert.equal(revealed(), 2);
+});
+
 test('unmatched source submissions replace old entries and subsequent source-only content', () => {
     const scene = popupHost();
     const original = { ...rootPopupPayload(), entriesCount: 1, initialEntryJson: '{"expression":"猫"}', contentKey: 'original' };
