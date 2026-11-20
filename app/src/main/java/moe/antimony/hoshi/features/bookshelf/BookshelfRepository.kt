@@ -332,7 +332,8 @@ internal class AndroidBookshelfRepository @Inject constructor(
         settingsRepository.update { it.copy(coverMode = coverMode) }
     }
 
-    override suspend fun rebuildLookupQuery() {
+    // Opening the dictionaries reads the frequency dictionaries into memory, so it stays off the main thread.
+    override suspend fun rebuildLookupQuery() = withContext(ioDispatcher) {
         dictionaryRepository.rebuildLookupQuery()
     }
 
