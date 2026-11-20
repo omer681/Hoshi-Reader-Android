@@ -329,8 +329,12 @@ fun ReaderWebView(
     }
     val chapterCuesReady = !paragraphMode || (isSasayakiMatchLoaded &&
         (!prepareParagraphTtsCues || paragraphTtsCuesJson != null))
-    val chapterCuesJson = if (prepareParagraphTtsCues) paragraphTtsCuesJson else
+    // Filtering, sorting and serializing a chapter's cues takes milliseconds, and this screen is
+    // rebuilt on every lookup, so the result is kept until the match data or the chapter changes.
+    val sasayakiChapterCuesJson = remember(sasayakiMatchData, cueChapterIndex) {
         ReaderSasayakiCues.chapterCuesJson(sasayakiMatchData, cueChapterIndex)
+    }
+    val chapterCuesJson = if (prepareParagraphTtsCues) paragraphTtsCuesJson else sasayakiChapterCuesJson
     val lookupPopups = stateHolder.lookupPopups
     var readerPopupHistories by remember { mutableStateOf<Map<String, ReaderPopupHistoryCounts>>(emptyMap()) }
     var rootSelectionHighlight by remember { mutableStateOf<ReaderRootSelectionHighlight?>(null) }
@@ -386,7 +390,10 @@ fun ReaderWebView(
     val readerPopupIframeUrl = remember(readerPopupIframeDocument) {
         readerLookupPopupIframeUrl(readerPopupIframeDocument.hashCode())
     }
-    LaunchedEffect(webView, readerPopupIframeUrl) {
+    // A chapter page that has just loaded has no popup frame yet, so the preload is repeated for it.
+    val readerPageRestoring = stateHolder.isWebViewRestoring
+    LaunchedEffect(webView, readerPopupIframeUrl, readerPageRestoring) {
+        if (readerPageRestoring) return@LaunchedEffect
         webView?.evaluateJavascript(
             """
                 (function() {
