@@ -41,7 +41,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import moe.antimony.hoshi.ui.withErrorDetails
 import moe.antimony.hoshi.LocalHoshiUiDependencies
@@ -183,7 +185,8 @@ fun BackupSettingsView(
             val result = runCatching {
                 context.contentResolver.validateImportFile(uri, ImportFileType.HoshiBackup)
                 repository.restoreDictionaries(context.contentResolver, uri)
-                appContainer.dictionaryRepository.rebuildLookupQuery()
+                // Opening the dictionaries reads the frequency dictionaries into memory.
+                withContext(Dispatchers.IO) { appContainer.dictionaryRepository.rebuildLookupQuery() }
             }
             operation = null
             showOperationMessage(
