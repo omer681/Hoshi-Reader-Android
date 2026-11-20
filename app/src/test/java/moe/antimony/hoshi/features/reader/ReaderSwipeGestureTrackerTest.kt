@@ -171,4 +171,38 @@ class ReaderSwipeGestureTrackerTest {
 
         assertTrue(result == ReaderSwipeGestureTracker.Result.None)
     }
+
+    @Test
+    fun touchStopsBeingALikelyTapOnceItDriftsEvenIfATapIsStillAccepted() {
+        val tracker = ReaderSwipeGestureTracker(minDistance = 72f)
+        assertTrue(!tracker.tapStillLikely)
+
+        tracker.onDown(240f, 100f, eventTime = 1_000L)
+        assertTrue(tracker.tapStillLikely)
+        tracker.onMove(250f, 110f, eventTime = 1_400L)
+        assertTrue(tracker.tapStillLikely)
+        tracker.onMove(250f, 130f, eventTime = 1_420L)
+        assertTrue(!tracker.tapStillLikely)
+
+        assertTrue(tracker.onUp(250f, 130f, eventTime = 1_450L) is ReaderSwipeGestureTracker.Result.Tap)
+        assertTrue(!tracker.tapStillLikely)
+    }
+
+    @Test
+    fun touchStopsBeingALikelyTapWhenItSwipesIsCancelledOrGainsAPointer() {
+        val swiped = ReaderSwipeGestureTracker(minDistance = 20f)
+        swiped.onDown(240f, 100f, eventTime = 1_000L)
+        assertTrue(swiped.onMove(225f, 100f, eventTime = 1_010L) == ReaderSwipeGestureTracker.Result.LeftSwipe)
+        assertTrue(!swiped.tapStillLikely)
+
+        val cancelled = ReaderSwipeGestureTracker(minDistance = 72f)
+        cancelled.onDown(240f, 100f, eventTime = 1_000L)
+        cancelled.onCancel()
+        assertTrue(!cancelled.tapStillLikely)
+
+        val pinched = ReaderSwipeGestureTracker(minDistance = 72f)
+        pinched.onDown(240f, 100f, eventTime = 1_000L)
+        pinched.onAdditionalPointerDown()
+        assertTrue(!pinched.tapStillLikely)
+    }
 }

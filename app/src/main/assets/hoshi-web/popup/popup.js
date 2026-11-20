@@ -1275,7 +1275,12 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
             return;
         }
 
-        node.forEach(child => renderStructuredContent(parent, child, language, dictName, exporting));
+        for (const child of node) {
+            if (visibleAreaFilled(parent)) {
+                return;
+            }
+            renderStructuredContent(parent, child, language, dictName, exporting);
+        }
         return;
     }
 
@@ -1341,6 +1346,11 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
         setStructuredContentElementStyle(element, node.style);
     }
 
+    const attachedFirst = joinsPageBeforeContent(parent, element);
+    if (attachedFirst) {
+        parent.appendChild(element);
+    }
+
     if (node.content) {
         renderStructuredContent(element, node.content, nextLanguage, dictName, exporting);
     }
@@ -1353,6 +1363,10 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
         element.setAttribute('rowspan', node.rowSpan);
     }
 
+    if (attachedFirst) {
+        return;
+    }
+
     if (tagName === 'table') {
         const container = document.createElement('div');
         container.classList.add('gloss-sc-table-container');
@@ -1362,6 +1376,52 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
     }
 
     parent.appendChild(element);
+}
+
+const VISIBLE_FIRST_BLOCKS = new Set(['DIV', 'UL', 'OL', 'LI']);
+
+// A section shorter than this (in characters of dictionary data) is not much taller than the
+// visible area, and measuring it while it is built costs more than building it whole.
+const VISIBLE_FIRST_MIN_CHARS = 8000;
+
+// Set while a popup's first dictionary section is built before the popup is shown. Building stops
+// between blocks once the section reaches below the visible area; the section is built whole after
+// the popup has appeared. `stopped` tells the caller that this happened.
+let visibleFirst = null;
+
+// The section joins `parent` before its content; `section` is the element whose height is measured.
+function visibleFirstIn(parent) {
+    return { parent, section: null, stopped: false, blocksSinceMeasure: 0 };
+}
+
+// Whether a block being built up to the visible area joins the page before its content, so the
+// height reached so far can be measured while the content is added.
+function joinsPageBeforeContent(parent, element) {
+    const state = visibleFirst;
+    if (!state || state.stopped || !parent.isConnected || !VISIBLE_FIRST_BLOCKS.has(element.tagName)) {
+        return false;
+    }
+    state.blocksSinceMeasure++;
+    return true;
+}
+
+// Whether enough has been built to cover the visible area, with some room to spare. Measuring makes
+// the browser lay out what was added, so it is only done after a few new blocks, and only from a
+// parent that is on the page: those are the containers that joined it before their content.
+function visibleAreaFilled(parent) {
+    const state = visibleFirst;
+    if (!state) {
+        return false;
+    }
+    if (state.stopped) {
+        return true;
+    }
+    if (state.blocksSinceMeasure < 4 || !parent.isConnected) {
+        return false;
+    }
+    state.blocksSinceMeasure = 0;
+    state.stopped = state.section.getBoundingClientRect().bottom >= window.innerHeight * 1.25;
+    return state.stopped;
 }
 
 function isPartOfSpeech(tag) {
@@ -2195,7 +2255,10 @@ function createEntryHeader(entry, idx) {
     return header;
 }
 
-function createGlossarySection(dictName, contents, isFirst, entryIdx) {
+// With `progress` (from `visibleFirstIn`), the section joins `progress.parent` before its content is
+// added, and content stops being added once the section covers the visible area. `progress.stopped`
+// then tells the caller that the section still has to be built whole.
+function createGlossarySection(dictName, contents, isFirst, entryIdx, progress = null) {
     const details = el('details', { className: 'glossary-group' });
     const collapsed = window.collapseMode === 'Collapse All'
         || (window.collapseMode === 'Custom' && window.collapsedDictionaries.includes(dictName));
@@ -2259,41 +2322,58 @@ function createGlossarySection(dictName, contents, isFirst, entryIdx) {
         dictWrapper.appendChild(termTagsRow);
     }
 
-    if (contents.length > 1) {
-        const ol = el('ol');
-        let prevTags = null;
-        contents.forEach((item) => {
-            const li = el('li');
-            const parsedTags = parseTags(item.definitionTags).filter(tag => !NUMERIC_TAG.test(tag));
-            const posTags = [...new Set(parsedTags.filter(isPartOfSpeech))].sort();
-            const currentTags = JSON.stringify(posTags);
-            const filteredTags = parsedTags.filter(tag => !isPartOfSpeech(tag) || !(prevTags !== null && prevTags === currentTags));
-            const tags = createGlossaryTags(filteredTags);
-            if (tags) {
-                li.appendChild(tags);
+    // Every container joins its parent before its content is rendered, so the section can be
+    // measured while it grows.
+    details.appendChild(dictWrapper);
+    if (progress) {
+        progress.parent.appendChild(details);
+        progress.section = details;
+        visibleFirst = progress;
+    }
+    try {
+        if (contents.length > 1) {
+            const ol = el('ol');
+            dictWrapper.appendChild(ol);
+            let prevTags = null;
+            for (const item of contents) {
+                if (visibleAreaFilled(ol)) {
+                    break;
+                }
+                const li = el('li');
+                const parsedTags = parseTags(item.definitionTags).filter(tag => !NUMERIC_TAG.test(tag));
+                const posTags = [...new Set(parsedTags.filter(isPartOfSpeech))].sort();
+                const currentTags = JSON.stringify(posTags);
+                const filteredTags = parsedTags.filter(tag => !isPartOfSpeech(tag) || !(prevTags !== null && prevTags === currentTags));
+                const tags = createGlossaryTags(filteredTags);
+                if (tags) {
+                    li.appendChild(tags);
+                }
+                const content = el('div', { className: 'glossary-content' });
+                li.appendChild(content);
+                ol.appendChild(li);
+                if (progress) {
+                    progress.blocksSinceMeasure++;
+                }
+                renderContent(content, item.content);
+                prevTags = currentTags;
             }
-            const content = el('div', { className: 'glossary-content' });
-            renderContent(content, item.content);
-            li.appendChild(content);
-            ol.appendChild(li);
-            prevTags = currentTags;
-        });
-        dictWrapper.appendChild(ol);
-    } else {
-        contents.forEach((item) => {
-            const wrapper = el('div');
-            const tags = createGlossaryTags(parseTags(item.definitionTags).filter(tag => !NUMERIC_TAG.test(tag)));
-            if (tags) {
-                wrapper.appendChild(tags);
-            }
-            const content = el('div', { className: 'glossary-content' });
-            renderContent(content, item.content);
-            wrapper.appendChild(content);
-            dictWrapper.appendChild(wrapper);
-        });
+        } else {
+            contents.forEach((item) => {
+                const wrapper = el('div');
+                const tags = createGlossaryTags(parseTags(item.definitionTags).filter(tag => !NUMERIC_TAG.test(tag)));
+                if (tags) {
+                    wrapper.appendChild(tags);
+                }
+                const content = el('div', { className: 'glossary-content' });
+                wrapper.appendChild(content);
+                dictWrapper.appendChild(wrapper);
+                renderContent(content, item.content);
+            });
+        }
+    } finally {
+        visibleFirst = null;
     }
 
-    details.appendChild(dictWrapper);
     return details;
 }
 
@@ -2710,27 +2790,77 @@ installPopupDocumentTapHandlers();
 
 // Set by the host page's 'popupRevealed' message.
 let resolvePopupRevealed = null;
+// What a popup that is built out of sight puts off until it is shown.
+let whenPopupRevealed = null;
 window.hoshiPopupRevealed = () => {
     resolvePopupRevealed?.();
     resolvePopupRevealed = null;
+    const deferred = whenPopupRevealed;
+    whenPopupRevealed = null;
+    deferred?.();
 };
+
+const POPUP_REVEAL_TIMEOUT_MS = 250;
 
 // Resolves once the host has revealed the popup and one more frame has been painted, or after a
 // timeout. It waits on a message and timers, not animation frames: while the popup keeps requesting
-// frames, the browser runs them ahead of the queued message that tells the host the content is ready.
-function popupShown(timeoutMs = 250) {
+// frames, the browser runs them ahead of the queued messages between the popup and its host.
+function popupShown() {
     return new Promise(resolve => {
         resolvePopupRevealed = resolve;
-        setTimeout(resolve, timeoutMs);
+        setTimeout(resolve, POPUP_REVEAL_TIMEOUT_MS);
     }).then(() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))));
 }
 
 window.renderPopup = function() {
     const container = document.getElementById('entries-container');
+    // The host sets this for a render whose popup it reveals afterwards. It holds for that render
+    // only: a render inside a popup that is already on screen (a redirect, history) gets no signal.
+    const awaitsReveal = window.hoshiPopupHostSignalsReveal === true;
+    window.hoshiPopupHostSignalsReveal = false;
+    // The host builds this popup ahead of a tap that may never be confirmed, so nothing that can be
+    // heard or seen happens before it is shown.
+    const revealHeld = window.hoshiPopupRevealHeld === true;
+    window.hoshiPopupRevealHeld = false;
+    whenPopupRevealed = null;
     if (!window.entryCount) {
         return;
     }
     const generation = ++renderGeneration;
+
+    // Adds the entry's dictionary sections. Resolves to false when a newer render has taken over.
+    const renderSections = async (entryDiv, entry, idx) => {
+        const grouped = {};
+        entry.glossaries.forEach(g => {
+            (grouped[g.dictionary] ??= []).push({
+                content: g.content,
+                definitionTags: g.definitionTags,
+                termTags: g.termTags
+            });
+        });
+
+        for (const [dictIdx, [dictName, items]] of Object.entries(grouped).entries()) {
+            const isFirst = dictIdx === 0;
+            // The popup can be revealed once its first section is there. Of a long section only as
+            // much as covers the visible area is built first; the rest of it, and the remaining
+            // sections, wait until the popup is on screen.
+            const revealPoint = awaitsReveal && idx === 0 && isFirst;
+            const size = revealPoint ? items.reduce((sum, item) => sum + (item.content?.length ?? 0), 0) : 0;
+            const progress = size >= VISIBLE_FIRST_MIN_CHARS ? visibleFirstIn(entryDiv) : null;
+            const section = createGlossarySection(dictName, items, isFirst, idx, progress);
+            if (!progress) {
+                entryDiv.appendChild(section);
+            }
+            applyHoshiPopupThemeOverrides(entryDiv);
+            await (revealPoint ? popupShown() : new Promise(r => requestAnimationFrame(r)));
+            if (generation !== renderGeneration) return false;
+            if (progress?.stopped) {
+                section.replaceWith(createGlossarySection(dictName, items, isFirst, idx));
+                applyHoshiPopupThemeOverrides(entryDiv);
+            }
+        }
+        return true;
+    };
 
     (async () => {
         for (let idx = 0; idx < window.entryCount; idx++) {
@@ -2753,7 +2883,13 @@ window.renderPopup = function() {
             entryDiv.appendChild(createEntryHeader(entry, idx));
 
             if (window.audioEnableAutoplay && window.audioSources?.length && idx === 0) {
-                playEntryAudio(idx);
+                if (revealHeld) {
+                    whenPopupRevealed = () => {
+                        if (generation === renderGeneration) playEntryAudio(idx);
+                    };
+                } else {
+                    playEntryAudio(idx);
+                }
             }
 
             const tags = createTags(entry);
@@ -2770,27 +2906,7 @@ window.renderPopup = function() {
                 if (generation !== renderGeneration) return;
             }
 
-            const grouped = {};
-            entry.glossaries.forEach(g => {
-                (grouped[g.dictionary] ??= []).push({
-                    content: g.content,
-                    definitionTags: g.definitionTags,
-                    termTags: g.termTags
-                });
-            });
-
-            const dictNames = Object.keys(grouped);
-            for (let dictIdx = 0; dictIdx < dictNames.length; dictIdx++) {
-                entryDiv.appendChild(createGlossarySection(dictNames[dictIdx], grouped[dictNames[dictIdx]], dictIdx === 0, idx));
-                applyHoshiPopupThemeOverrides(entryDiv);
-                if (idx === 0 && dictIdx === 0 && window.hoshiPopupHostSignalsReveal) {
-                    // The popup can be revealed now, so the remaining sections wait until it is on screen.
-                    await popupShown();
-                } else {
-                    await new Promise(r => requestAnimationFrame(r));
-                }
-                if (generation !== renderGeneration) return;
-            }
+            if (!await renderSections(entryDiv, entry, idx)) return;
         }
         if (generation !== renderGeneration) return;
 

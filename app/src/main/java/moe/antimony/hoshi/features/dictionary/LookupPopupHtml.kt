@@ -270,7 +270,14 @@ internal object LookupPopupHtml {
                         function postReady() {
                             if (posted) return;
                             posted = true;
-                            webkit.messageHandlers.contentReady.postMessage();
+                            // Inside a reader page the host is told directly: a message only
+                            // reaches it after the frame the browser is about to produce.
+                            var told = false;
+                            try {
+                                told = window.parent !== window &&
+                                    window.parent.hoshiReaderPopupHost?.popupContentReady?.(window.popupId) === true;
+                            } catch (e) {}
+                            if (!told) webkit.messageHandlers.contentReady.postMessage();
                         }
                         function hasRenderableContent() {
                             if (!container || !window.entryCount) {
@@ -334,6 +341,7 @@ internal object LookupPopupHtml {
                             if (message.type === 'renderPopup') {
                                 // The host that sends this message posts 'popupRevealed' once the popup is shown.
                                 window.hoshiPopupHostSignalsReveal = true;
+                                window.hoshiPopupRevealHeld = message.revealHeld === true;
                                 window.popupId = message.popupId || null;
                                 closeOverlay();
                                 window.entryCount = message.entriesCount || 0;

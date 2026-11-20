@@ -192,6 +192,8 @@ internal data class ReaderLookupPopupFramePayload(
 internal data class ReaderLookupPopupStackPayload(
     val popups: List<ReaderLookupPopupFramePayload>,
     val rootHighlight: ReaderLookupPopupRootHighlightPayload? = null,
+    /** The page builds the root popup but keeps it out of sight until told to show it. */
+    val rootRevealHeld: Boolean = false,
 ) {
     fun toJson(): String = readerPopupJson.encodeToString(this)
 }

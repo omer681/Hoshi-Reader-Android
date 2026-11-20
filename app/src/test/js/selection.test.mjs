@@ -723,6 +723,102 @@ test('shared selection clips vertical ruby annotation rects to partial base sele
     );
 });
 
+// A reader page whose text starts under the tap; each character is a 20 px wide box on one line.
+function readerSelectionScene(text) {
+    const scene = loadSelection(text);
+    const { document, selection, textNode, window } = scene;
+    document.pointElement = hitElement([]);
+    document.createRange = () => ({
+        startOffset: 0,
+        endOffset: 0,
+        setStart(_node, offset) { this.startOffset = offset; },
+        setEnd(_node, offset) { this.endOffset = offset; },
+        getClientRects() { return [{ x: this.startOffset * 20, y: 0, width: (this.endOffset - this.startOffset) * 20, height: 30 }]; },
+        getBoundingClientRect() { return this.getClientRects()[0]; },
+    });
+    selection.getCharacterAtPoint = () => ({ node: textNode, offset: 0 });
+    selection.getSelectionRect = () => null;
+    selection.getSentenceContext = () => ({ sentence: text, sentenceOffset: 0 });
+    window.scanNonJapaneseText = false;
+    return scene;
+}
+
+test('a touch is prepared without selecting, and reports what the tap then selects', () => {
+    const { selection, window } = readerSelectionScene('猫𠮟る');
+    const prepared = [];
+    let selected = null;
+    window.HoshiTextSelection = {
+        postPrepared(message) { prepared.push(JSON.parse(message)); },
+        postMessage(message) { selected = JSON.parse(message); },
+    };
+    selection.configure({ language: 'ja', bridge: 'android-reader' });
+    let cleared = 0;
+    selection.clearSelection = () => { cleared++; };
+
+    selection.prepareText(1, 1, 16, 7);
+
+    assert.equal(cleared, 0);
+    assert.equal(selection.selection ?? null, null);
+    assert.equal(prepared.length, 1);
+    assert.equal(prepared[0].token, 7);
+    assert.equal(prepared[0].rectsByLength.length, 3);
+
+    let released = 0;
+    let held = true;
+    window.hoshiReaderPopupHost = { releaseHeldRootReveal() { released++; return held; } };
+    let reports = 0;
+    const report = selection.selectionReport;
+    selection.selectionReport = function(...args) { reports++; return report.apply(this, args); };
+    assert.equal(selection.selectText(1, 1, 16), '猫𠮟る');
+    const { token, ...preparedReport } = prepared[0];
+    assert.deepEqual(preparedReport, selected);
+    assert.equal(released, 1, 'the page shows the prepared popup itself');
+    assert.equal(reports, 0, 'the prepared report is reused');
+
+    selection.prepareText(1, 1, 16, 8);
+    assert.equal(prepared.length, 1, 'a touch on the selected word would deselect it');
+
+    selection.selection = null;
+    selection.prepareText(1, 1, 16, 9);
+    held = false;
+    assert.equal(selection.selectText(1, 1, 16), '猫𠮟る');
+    assert.equal(reports, 2, 'a prepared popup that is gone means a fresh report');
+    selection.selection = null;
+    assert.equal(selection.selectText(1, 1, 16), '猫𠮟る');
+    assert.equal(released, 2, 'a prepared touch counts once');
+
+    selection.selection = null;
+    selection.configure({ bridge: 'webkit' });
+    selection.prepareText(1, 1, 16, 10);
+    assert.equal(prepared.length, 2, 'only the reader prepares lookups');
+});
+
+test('reader selections carry the highlight rectangles for every match length', () => {
+    const { selection, window } = readerSelectionScene('猫𠮟る');
+    selection.clearSelection = () => {};
+    let posted = null;
+    window.HoshiTextSelection = { postMessage(message) { posted = JSON.parse(message); } };
+    window.webkit = { messageHandlers: { textSelected: { postMessage(payload) { posted = payload; } } } };
+
+    selection.configure({ language: 'ja', bridge: 'android-reader' });
+    assert.equal(selection.selectText(1, 1, 16), '猫𠮟る');
+
+    assert.deepEqual(posted.rectsByLength, [
+        [{ x: 0, y: 0, width: 20, height: 30 }],
+        [{ x: 0, y: 0, width: 60, height: 30 }],
+        [{ x: 0, y: 0, width: 80, height: 30 }],
+    ]);
+    assert.deepEqual(
+        posted.rectsByLength,
+        [1, 2, 3].map(count => JSON.parse(JSON.stringify(selection.selectionRects(count)))),
+    );
+
+    selection.selection = null;
+    selection.configure({ bridge: 'webkit' });
+    assert.equal(selection.selectText(1, 1, 16), '猫𠮟る');
+    assert.equal('rectsByLength' in posted, false);
+});
+
 test('shared selection keeps vertical lookup rects split when adjacent ruby-aware columns barely overlap', () => {
     const { selection, window } = loadSelection('信憑性がある');
     window.getComputedStyle = () => ({ writingMode: 'vertical-rl' });

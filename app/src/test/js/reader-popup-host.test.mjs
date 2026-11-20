@@ -198,6 +198,67 @@ function rootPopupPayload() {
     };
 }
 
+test('a popup prepared for a touch stays out of sight until the tap is confirmed', () => {
+    const scene = popupHost();
+    const nativeMessages = [];
+    scene.window.HoshiReaderPopup = { postMessage: message => nativeMessages.push(JSON.parse(message)) };
+    const popup = { ...rootPopupPayload(), entriesCount: 1, initialEntryJson: '{"expression":"猫"}', contentKey: 'first' };
+    scene.host.renderStack({ popups: [popup], rootRevealHeld: true });
+    const shell = scene.document.getElementById('hoshi-reader-popup-layer').children[0];
+    const iframe = shell.querySelector('.hoshi-reader-popup-iframe');
+    const messages = [];
+    iframe.contentWindow.postMessage = message => messages.push(message);
+    iframe.dispatchEvent('load');
+    const revealed = () => nativeMessages.filter(message => message.name === 'popupRevealed').length;
+
+    assert.equal(messages.find(message => message.type === 'renderPopup').revealHeld, true);
+    scene.host.popupContentReady('root');
+    assert.equal(shell.dataset.contentReady, 'true');
+    assert.equal(shell.dataset.revealReady, 'false');
+    assert.equal(revealed(), 0);
+
+    assert.equal(scene.host.releaseRootReveal('another'), false);
+    assert.equal(revealed(), 0);
+    assert.equal(scene.host.releaseRootReveal('root'), true);
+    assert.equal(shell.dataset.revealReady, 'true');
+    assert.equal(revealed(), 1);
+
+    assert.equal(scene.host.releaseHeldRootReveal(), false, 'nothing is held any more');
+
+    scene.host.renderStack({ popups: [] });
+    assert.equal(scene.host.releaseRootReveal('root'), false);
+
+    scene.host.renderStack({ popups: [{ ...popup, id: 'next', contentKey: 'next' }], rootRevealHeld: true });
+    scene.host.popupContentReady('next');
+    assert.equal(revealed(), 1);
+    assert.equal(scene.host.releaseHeldRootReveal(), true);
+    assert.equal(revealed(), 2);
+});
+
+test('a popup frame that reports its content directly is revealed before its message arrives', () => {
+    const scene = popupHost();
+    const nativeMessages = [];
+    scene.window.HoshiReaderPopup = { postMessage: message => nativeMessages.push(JSON.parse(message)) };
+    const popup = { ...rootPopupPayload(), entriesCount: 1, initialEntryJson: '{"expression":"猫"}', contentKey: 'first' };
+    scene.host.renderStack({ popups: [popup] });
+    const shell = scene.document.getElementById('hoshi-reader-popup-layer').children[0];
+    const iframe = shell.querySelector('.hoshi-reader-popup-iframe');
+    const messages = [];
+    iframe.contentWindow.postMessage = message => messages.push(message);
+    iframe.dispatchEvent('load');
+    const revealed = () => nativeMessages.filter(message => message.name === 'popupRevealed').length;
+
+    scene.host.popupContentReady('unknown');
+    assert.equal(revealed(), 0);
+    scene.host.popupContentReady('root');
+    assert.equal(shell.dataset.contentReady, 'true');
+    assert.equal(revealed(), 1);
+    assert.equal(messages.filter(message => message.type === 'popupRevealed').length, 1);
+
+    scene.dispatchMessage({ source: 'hoshi-popup-iframe', name: 'contentReady', popupId: 'root' });
+    assert.equal(revealed(), 1);
+});
+
 function renderRootHighlightScene(rootHighlight, setupDocument = null) {
     const { document, host, dispatchMessage } = popupHost();
     setupDocument?.(document);

@@ -14,18 +14,22 @@ internal sealed interface ReaderSelectionCommand {
             "(window.hoshiParagraph?.enabled ? window.hoshiParagraph : window.hoshiSelection).selectText($x, $y, $maxLength)"
     }
 
+    /** Asks what [SelectText] would select, without selecting it. Paragraph mode gives taps another meaning. */
+    data class PrepareText(
+        val x: Float,
+        val y: Float,
+        val maxLength: Int,
+        val token: Int,
+    ) : ReaderSelectionCommand {
+        override val source: String =
+            "if(!window.hoshiParagraph?.enabled){window.hoshiSelection?.prepareText?.($x, $y, $maxLength, $token);}"
+    }
+
     data class HighlightSelection(
         val count: Int,
     ) : ReaderSelectionCommand {
         override val source: String =
             "window.hoshiSelection.highlightSelection($count)"
-    }
-
-    data class SelectionRects(
-        val count: Int,
-    ) : ReaderSelectionCommand {
-        override val source: String =
-            "JSON.stringify(window.hoshiSelection.selectionRects($count))"
     }
 
     data class NativeMenuRect(val request: Int) : ReaderSelectionCommand {

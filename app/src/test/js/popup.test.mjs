@@ -141,6 +141,13 @@ class FakeElement {
         }
         this.isConnected = false;
     }
+
+    replaceWith(replacement) {
+        const siblings = this.parentElement.children;
+        siblings[siblings.indexOf(this)] = replacement;
+        replacement.parentElement = this.parentElement;
+        this.isConnected = false;
+    }
 }
 
 function popupContext({
@@ -1655,6 +1662,89 @@ test('kanji touch redirect renders in place and suppresses its duplicate click',
     assert.equal(setup.entriesContainer.children.length, 0);
     setup.context.window.navigateForward();
     assert.equal(setup.entriesContainer.children[0].className, 'entry kanji-entry');
+});
+
+test('a long first dictionary is built up to the visible area before the popup is revealed and whole afterwards', async () => {
+    const glossaries = Array.from({ length: 40 }, (_, index) => ({
+        dictionary: 'First',
+        content: `${index} ${'x'.repeat(300)}`,
+        definitionTags: '',
+        termTags: '',
+    }));
+    const setup = popupContext();
+    const { window, document } = setup.context;
+    const listItems = element => descendants(element).filter(node => node.tagName === 'LI').length;
+    const originalRect = FakeElement.prototype.getBoundingClientRect;
+    // Each list item stands for 100 pixels of height, and 400 pixels are visible.
+    FakeElement.prototype.getBoundingClientRect = function() {
+        return { ...originalRect.call(this), bottom: this.tagName === 'DETAILS' ? listItems(this) * 100 : 0 };
+    };
+    try {
+        window.innerHeight = 400;
+        window.hoshiPopupHostSignalsReveal = true;
+        window.entryCount = 1;
+        window.lookupEntries = [{ expression: '手', reading: 'て', glossaries }];
+        window.renderPopup();
+        await flushAsyncWork();
+        const container = document.getElementById('entries-container');
+        const shownFirst = listItems(container);
+        assert.ok(shownFirst >= 5 && shownFirst < 40, `built ${shownFirst} of 40 items before the reveal`);
+
+        window.hoshiPopupRevealed();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await flushAsyncWork();
+        assert.equal(listItems(container), 40);
+    } finally {
+        FakeElement.prototype.getBoundingClientRect = originalRect;
+    }
+});
+
+test('a render inside a popup that is already shown does not wait for a reveal', async () => {
+    const glossaries = ['First', 'Second'].map(dictionary => ({
+        dictionary,
+        content: 'meaning',
+        definitionTags: '',
+        termTags: '',
+    }));
+    const setup = popupContext();
+    const { window, document } = setup.context;
+    const container = document.getElementById('entries-container');
+    const sections = () => descendants(container).filter(node => node.tagName === 'DETAILS').length;
+    window.entryCount = 1;
+    window.lookupEntries = [{ expression: '手', reading: 'て', glossaries }];
+
+    window.hoshiPopupHostSignalsReveal = true;
+    window.renderPopup();
+    await flushAsyncWork();
+    assert.equal(sections(), 1, 'the host-driven render holds the second dictionary until the reveal');
+    window.hoshiPopupRevealed();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await flushAsyncWork();
+    assert.equal(sections(), 2);
+
+    container.innerHTML = '';
+    window.renderPopup();
+    await flushAsyncWork();
+    assert.equal(sections(), 2, 'the later render adds both dictionaries without a reveal');
+});
+
+test('a short first dictionary is built whole before the popup is revealed', async () => {
+    const glossaries = Array.from({ length: 6 }, (_, index) => ({
+        dictionary: 'First',
+        content: `meaning ${index}`,
+        definitionTags: '',
+        termTags: '',
+    }));
+    const setup = popupContext();
+    const { window, document } = setup.context;
+    window.innerHeight = 0;
+    window.hoshiPopupHostSignalsReveal = true;
+    window.entryCount = 1;
+    window.lookupEntries = [{ expression: '手', reading: 'て', glossaries }];
+    window.renderPopup();
+    await flushAsyncWork();
+    const items = descendants(document.getElementById('entries-container')).filter(node => node.tagName === 'LI');
+    assert.equal(items.length, 6);
 });
 
 test('kanji history resumes entries that were still loading when redirect started', async () => {
