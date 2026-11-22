@@ -783,6 +783,7 @@ fun ReaderWebView(
     }
     fun setLookupPopups(nextPopups: List<LookupPopupItem>) {
         val supersededPending = lookupPopupDirectSync.pending != null || lookupPopupDirectSync.prepared != null
+        val closesPopups = nextPopups.size < stateHolder.lookupPopups.size
         lookupPopupDirectSync.pending = null
         lookupPopupDirectSync.prepared = null
         val activeIds = nextPopups.mapTo(mutableSetOf()) { it.id }
@@ -791,8 +792,9 @@ fun ReaderWebView(
             highlight.popupId == null || highlight.popupId in activeIds
         }
         stateHolder.updateLookupPopups(nextPopups)
-        // The page was shown a popup that never reached the screen state, so it gets the real stack back.
-        if (supersededPending) lookupPopupDirectSync.send(webView, nextPopups, rootSelectionHighlight)
+        // The page gets the stack at once when it shows a popup that never reached the screen state, or
+        // popups that just closed; waiting for the reader screen to recompose would leave them up longer.
+        if (supersededPending || closesPopups) lookupPopupDirectSync.send(webView, nextPopups, rootSelectionHighlight)
     }
     fun commitPendingRootLookup(pending: PendingRootLookup) {
         if (lookupPopupDirectSync.pending !== pending) return
