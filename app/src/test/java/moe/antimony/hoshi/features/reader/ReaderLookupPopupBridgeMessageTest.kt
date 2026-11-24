@@ -41,6 +41,10 @@ class ReaderLookupPopupBridgeMessageTest {
             ReaderLookupPopupBridgeMessage.TapOutside(popupId = "root", messageId = null),
             ReaderLookupPopupBridgeMessage.fromJson("""{"name":"tapOutside","popupId":"root"}"""),
         )
+        assertEquals(
+            ReaderLookupPopupBridgeMessage.PopupRevealed("root", null),
+            ReaderLookupPopupBridgeMessage.fromJson("""{"name":"popupRevealed","popupId":"root"}"""),
+        )
 
         assertEquals(
             ReaderLookupPopupBridgeMessage.SwipeDismiss(popupId = "root", messageId = null),

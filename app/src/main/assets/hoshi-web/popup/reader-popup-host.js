@@ -202,6 +202,7 @@
         if (ready && record.contentReady && record.payload && !record.revealNotified) {
             record.revealNotified = true;
             record.iframe.contentWindow?.postMessage({ type: 'popupRevealed', popupId: record.payload.id }, ORIGIN);
+            postNative({ name: 'popupRevealed', id: null, popupId: record.payload.id, body: null });
         }
     }
 

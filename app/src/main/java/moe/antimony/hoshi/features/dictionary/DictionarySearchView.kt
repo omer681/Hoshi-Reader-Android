@@ -552,7 +552,8 @@ internal fun DictionarySearchView(
                     bodyJson = entry?.let(LookupPopupHtml::entryJsonString) ?: "null",
                 )
             }
-            is ReaderLookupPopupBridgeMessage.ContentReady -> Unit
+            is ReaderLookupPopupBridgeMessage.ContentReady,
+            is ReaderLookupPopupBridgeMessage.PopupRevealed -> Unit
             is ReaderLookupPopupBridgeMessage.PopupScrolled -> {
                 if (message.popupId == DictionarySearchRootPopupId) {
                     if (uiState.popups.isNotEmpty()) {

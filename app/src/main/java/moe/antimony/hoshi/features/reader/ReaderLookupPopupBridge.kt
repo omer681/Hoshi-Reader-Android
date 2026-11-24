@@ -296,6 +296,12 @@ internal sealed class ReaderLookupPopupBridgeMessage {
         override val messageId: String?,
     ) : ReaderLookupPopupBridgeMessage()
 
+    /** The page has made the popup visible. */
+    data class PopupRevealed(
+        override val popupId: String,
+        override val messageId: String?,
+    ) : ReaderLookupPopupBridgeMessage()
+
     data class PopupScrolled(
         override val popupId: String,
         override val messageId: String?,
@@ -416,6 +422,7 @@ internal sealed class ReaderLookupPopupBridgeMessage {
                     index = payload.int("body")?.takeIf { it >= 0 } ?: return null,
                 )
                 "contentReady" -> ContentReady(popupId, messageId)
+                "popupRevealed" -> PopupRevealed(popupId, messageId)
                 "popupScrolled" -> PopupScrolled(popupId, messageId)
                 "scrollState" -> {
                     val body = payload.obj("body") ?: return null
