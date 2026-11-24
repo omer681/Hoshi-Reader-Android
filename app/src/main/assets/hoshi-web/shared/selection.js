@@ -219,10 +219,16 @@ window.hoshiSelection = {
         this.isWordStartBoundaryAt = bindTextBoundary(policy?.isWordStartBoundaryAt, wordStart);
     },
 
+    // The app's selection bridge in the Android reader; other hosts have none.
+    readerBridge() {
+        return this.options.bridge === 'android-reader'
+            ? (window.HoshiTextSelection || globalThis.HoshiTextSelection)
+            : null;
+    },
+
     postTextSelected(selection) {
         if (this.options.bridge === 'android-reader') {
-            const bridge = window.HoshiTextSelection || globalThis.HoshiTextSelection;
-            bridge?.postMessage?.(JSON.stringify(selection));
+            this.readerBridge()?.postMessage?.(JSON.stringify(selection));
             return;
         }
         window.webkit?.messageHandlers?.textSelected?.postMessage(selection);
@@ -558,44 +564,108 @@ window.hoshiSelection = {
         return this.getSentenceContext(startNode, startOffset).sentence;
     },
 
-    selectText(x, y, maxLength, rectX = x, rectY = y) {
-        this.lastTapWasText = false;
+    // What a tap at a point lands on: 'outside' the text area, a 'link', an 'image', hidden
+    // 'furigana', 'none' of these, or 'text' with the position a selection would start at.
+    tapTarget(x, y, rectX = x, rectY = y) {
         const viewport = window.hoshiReader?.contentViewport?.();
         if (viewport && (x < viewport.left || x >= viewport.right || y < viewport.top || y >= viewport.bottom)) {
-            this.clearSelection();
-            return null;
+            return { kind: 'outside' };
         }
         const hitElement = document.elementFromPoint(x, y);
         if (hitElement?.closest('a')) {
-            return this.linkTapResult();
+            return { kind: 'link' };
         }
         if (hitElement?.closest('img, image, .blur-wrapper')) {
-            return this.imageTapResult();
+            return { kind: 'image' };
         }
         const furigana = hitElement?.closest('ruby.furigana-hidden');
         if (furigana) {
-            this.revealFurigana(furigana);
+            return { kind: 'furigana', furigana };
+        }
+        const rawHit = this.getCharacterAtPoint(x, y, rectX, rectY);
+        return rawHit ? { kind: 'text', hit: this.selectionStartForHit(rawHit) } : { kind: 'none' };
+    },
+
+    // A tap on the start of the current selection deselects it.
+    isSelectionStart(hit) {
+        return !!this.selection && hit.node === this.selection.startNode && hit.offset === this.selection.startOffset;
+    },
+
+    selectText(x, y, maxLength, rectX = x, rectY = y) {
+        this.lastTapWasText = false;
+        const target = this.tapTarget(x, y, rectX, rectY);
+        if (target.kind === 'link') {
+            return this.linkTapResult();
+        }
+        if (target.kind === 'image') {
+            return this.imageTapResult();
+        }
+        if (target.kind === 'furigana') {
+            this.revealFurigana(target.furigana);
             this.clearSelection();
             return 'furigana';
         }
-        const rawHit = this.getCharacterAtPoint(x, y, rectX, rectY);
-
-        if (!rawHit) {
+        if (target.kind !== 'text') {
             this.clearSelection();
             return null;
         }
         this.lastTapWasText = true;
-        const hit = this.selectionStartForHit(rawHit);
+        const hit = target.hit;
 
-        if (this.selection &&
-            hit.node === this.selection.startNode &&
-            hit.offset === this.selection.startOffset) {
+        if (this.isSelectionStart(hit)) {
             this.clearSelection();
             return null;
         }
 
         this.clearSelection();
 
+        const prepared = this.takePreparedTouch(hit, maxLength);
+        const scanned = prepared?.scanned ?? this.scanSelection(hit, maxLength);
+        if (!scanned) {
+            return null;
+        }
+        this.selection = scanned;
+        // The app is told exactly what it was told when the touch was prepared, so it recognises the tap.
+        this.postTextSelected(prepared?.report ?? this.selectionReport(rectX, rectY));
+
+        return scanned.text;
+    },
+
+    // The selection prepared when the finger touched down, if this tap starts at the same character and
+    // its popup is still waiting out of sight. The popup is shown at once, without waiting for the app.
+    takePreparedTouch(hit, maxLength) {
+        const prepared = this.preparedTouch;
+        this.preparedTouch = null;
+        if (!prepared || prepared.node !== hit.node || prepared.offset !== hit.offset || prepared.maxLength !== maxLength) {
+            return null;
+        }
+        return window.hoshiReaderPopupHost?.releaseHeldRootReveal?.() ? prepared : null;
+    },
+
+    // Reports what a tap at this point would select, without selecting anything. The reader calls it
+    // when a finger touches down, so the lookup can be ready by the time the tap is confirmed.
+    prepareText(x, y, maxLength, token) {
+        this.preparedTouch = null;
+        const bridge = this.readerBridge();
+        if (!bridge?.postPrepared) return;
+        const { kind, hit } = this.tapTarget(x, y);
+        // A tap on the selected word deselects it, so there is nothing to look up.
+        if (kind !== 'text' || this.isSelectionStart(hit)) return;
+        const current = this.selection;
+        const scanned = this.scanSelection(hit, maxLength);
+        if (!scanned) return;
+        this.selection = scanned;
+        try {
+            const report = this.selectionReport(x, y);
+            this.preparedTouch = { node: hit.node, offset: hit.offset, maxLength, scanned, report };
+            bridge.postPrepared(JSON.stringify({ ...report, token }));
+        } finally {
+            this.selection = current;
+        }
+    },
+
+    // The selection that starts at `hit`, in the form `selectText` keeps it. Changes nothing.
+    scanSelection(hit, maxLength) {
         const container = this.findParagraph(hit.node) || document.body;
         const walker = this.createWalker(container);
 
@@ -630,36 +700,39 @@ window.hoshiSelection = {
             offset = 0;
         }
 
-        if (!text) {
+        if (!text || !ranges.length) {
             return null;
         }
-        const visibleRanges = ranges;
-        if (!visibleRanges?.length) {
-            return null;
-        }
-
-        this.selection = {
+        return {
             startNode: hit.node,
             startOffset: hit.offset,
-            ranges: visibleRanges,
+            ranges,
             semanticRanges: ranges,
             text
         };
+    },
 
-        const sentenceContext = this.getSentenceContext(hit.node, hit.offset);
+    // What the app is told about the current selection.
+    selectionReport(rectX, rectY) {
+        const { startNode, startOffset, text } = this.selection;
+        const sentenceContext = this.getSentenceContext(startNode, startOffset);
         const normalizedOffset = window.hoshiReader
-                ? this.getNormalizedOffset(hit.node, hit.offset)
+                ? this.getNormalizedOffset(startNode, startOffset)
                 : null;
-        this.postTextSelected({
+        const selected = {
             text,
             sentence: sentenceContext.sentence,
             rect: this.getSelectionRect(rectX, rectY),
-            chapterIndex: this.chapterIndex(hit.node),
+            chapterIndex: this.chapterIndex(startNode),
             normalizedOffset,
             sentenceOffset: sentenceContext.sentenceOffset
-        });
-
-        return text;
+        };
+        if (this.options.bridge === 'android-reader') {
+            // The reader highlights the matched part of the selection. Its length is only known after
+            // the lookup, so the rectangles for every length go along and the app need not ask again.
+            selected.rectsByLength = this.selectionRectsByLength();
+        }
+        return selected;
     },
 
     getSelectionRect(x, y) {
@@ -685,12 +758,24 @@ window.hoshiSelection = {
             return [];
         }
 
-        const rects = [];
-        for (const range of this.selectionCharacterRanges(charCount)) {
-            this.rectsForRange(range).forEach((rect) => rects.push(rect));
-        }
+        return this.shownSelectionRects(this.mergeSelectionRects(
+            this.selectionCharacterRanges(charCount).flatMap(range => this.rectsForRange(range))
+        ));
+    },
 
-        const merged = this.mergeSelectionRects(rects);
+    // What `selectionRects` gives for each number of characters, from one up to the whole selection.
+    // Merging only ever extends the last rectangle, so every character continues the merge of the
+    // ones before it.
+    selectionRectsByLength() {
+        const merged = [];
+        return this.selectionCharacterRanges(Infinity).map(range => {
+            this.mergeSelectionRects(this.rectsForRange(range), merged);
+            return this.shownSelectionRects(merged.map(rect => ({ ...rect })));
+        });
+    },
+
+    // Merged rectangles as the reader shows them.
+    shownSelectionRects(merged) {
         const visible = this.options.rubyAwareRects ? this.unifyVerticalColumnRects(merged) : merged;
         return visible.map(rect => this.clipToContentViewport(rect)).filter(Boolean);
     },
@@ -767,9 +852,8 @@ window.hoshiSelection = {
         return ranges;
     },
 
-    mergeSelectionRects(rects) {
-        const merged = [];
-
+    // Adds the rectangles to `merged`, joining each one that touches the last.
+    mergeSelectionRects(rects, merged = []) {
         for (const rect of rects) {
             const current = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
             const previous = merged[merged.length - 1];

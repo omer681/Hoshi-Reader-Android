@@ -47,6 +47,7 @@ internal fun readerLookupPopupFramePayloads(
     ttsAvailable: Boolean = false,
     ttsWasPaused: Boolean = false,
     ttsIsPlaying: Boolean = false,
+    rootPopupIsNew: Boolean = false,
 ): List<ReaderLookupPopupFramePayload> =
     popups.mapIndexed { index, popup ->
         val history = histories[popup.id] ?: ReaderPopupHistoryCounts()
@@ -62,7 +63,7 @@ internal fun readerLookupPopupFramePayloads(
             sasayakiWasPaused = sasayakiWasPaused,
             sasayakiIsPlaying = sasayakiIsPlaying,
             iframeUrl = iframeUrl,
-            includeInitialEntryJson = shouldSendInitialEntryJson(
+            includeInitialEntryJson = rootPopupIsNew || shouldSendInitialEntryJson(
                 popup = popup,
                 popupIndex = index,
                 rootSelectionHighlight = rootSelectionHighlight,
@@ -82,27 +83,67 @@ private fun shouldSendInitialEntryJson(
         rootSelectionHighlight?.popupId != popup.id ||
         rootSelectionHighlight.rects == null
 
+/** A looked-up root popup and its highlight, as last sent to the page. */
+internal class PendingRootLookup(val popup: LookupPopupItem, val highlight: ReaderRootSelectionHighlight)
+
+/** The popup placed at the first rectangle of its match, with those rectangles as its highlight. */
+internal fun pendingRootLookup(popup: LookupPopupItem, rects: List<ReaderSelectionRect>): PendingRootLookup {
+    val shown = rects.ifEmpty { listOf(popup.state.selection.rect) }
+    return PendingRootLookup(
+        popup = popup.copy(state = popup.state.copy(selection = popup.state.selection.copy(rect = shown.first()))),
+        highlight = ReaderRootSelectionHighlight(popupId = popup.id, rects = shown),
+    )
+}
+
+/**
+ * A lookup made when a finger touched a word. The page builds its popup out of sight and shows it
+ * once a tap on the same text is confirmed; any other end of the touch discards it.
+ */
+internal class PreparedRootLookup(
+    val selection: ReaderSelectionData,
+    val lookup: PendingRootLookup,
+    val highlightCount: Int,
+)
+
+/** A prepared lookup that no tap claimed is discarded once the touch can no longer be a tap. */
+internal const val preparedRootLookupLifetimeMillis = ReaderSwipeGestureTracker.MAX_TAP_DURATION_MS + 300L
+
 /**
  * Sends a popup stack to the reader page as soon as it is known.
  *
  * The composed sync below only runs after the reader screen has recomposed, which takes tens of
- * milliseconds on slow devices. A lookup calls [send] right after it has updated the popup state,
- * and the composed sync then skips the stack it would otherwise send a second time.
+ * milliseconds on slow devices. A lookup calls [send] instead of updating the popup state and keeps
+ * the popup in [pending]; the state follows once the page has revealed the popup. The composed
+ * sync skips a stack that is identical to the last one sent.
  */
-/** A looked-up root popup and its highlight, as last sent to the page. */
-internal class PendingRootLookup(var popup: LookupPopupItem, var highlight: ReaderRootSelectionHighlight)
-
 internal class ReaderLookupPopupDirectSync {
-    /** Builds the stack JSON from the latest composition's settings. Set after every composition. */
-    var buildJson: ((List<LookupPopupItem>, ReaderRootSelectionHighlight?) -> String)? = null
+    /**
+     * Builds the stack JSON from the latest composition's settings. Set after every composition. The
+     * third argument says that the page has not been sent the root popup yet, so its first entry goes
+     * along even when the highlight is already known. The last one tells the page to build the root
+     * popup without showing it.
+     */
+    var buildJson: ((List<LookupPopupItem>, ReaderRootSelectionHighlight?, Boolean, Boolean) -> String)? = null
 
     /** The root popup the page already shows while the screen state has not caught up. Main thread only. */
     var pending: PendingRootLookup? = null
+
+    /** The root popup the page has built out of sight for a touch that may become a tap. Main thread only. */
+    var prepared: PreparedRootLookup? = null
+
+    /** Counts touches; a prepared selection from the page counts only for the touch it names. */
+    var prepareToken = 0
     private var lastWebView: WebView? = null
     private var lastJson: String? = null
 
-    fun send(webView: WebView?, popups: List<LookupPopupItem>, rootHighlight: ReaderRootSelectionHighlight?) {
-        val json = buildJson?.invoke(popups, rootHighlight) ?: return
+    fun send(
+        webView: WebView?,
+        popups: List<LookupPopupItem>,
+        rootHighlight: ReaderRootSelectionHighlight?,
+        rootPopupIsNew: Boolean = false,
+        revealHeld: Boolean = false,
+    ) {
+        val json = buildJson?.invoke(popups, rootHighlight, rootPopupIsNew, revealHeld) ?: return
         sendJson(webView ?: return, json)
     }
 

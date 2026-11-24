@@ -101,7 +101,10 @@ internal fun ChapterWebView(
     onPageCuesReady: (WebView) -> Unit,
     sasayakiTextColor: Long,
     sasayakiBackgroundColor: Long,
-    onTextSelected: (ReaderSelectionData, selectionRects: (Int, (List<ReaderSelectionRect>) -> Unit) -> Unit) -> Unit,
+    onTextSelected: (ReaderSelectionMessage) -> Unit,
+    onLookupTouchDown: () -> Int? = { null },
+    onTextPrepared: (ReaderSelectionMessage) -> Unit = {},
+    onLookupTouchAbandoned: () -> Unit = {},
     onClearLookupPopup: () -> Unit,
     onReaderTapOutside: () -> Unit,
     onReaderInteraction: () -> Unit,
@@ -127,6 +130,9 @@ internal fun ChapterWebView(
     val currentChapterCues = rememberUpdatedState(if (chapterCuesReady) chapterSasayakiCuesJson ?: "[]" else null)
     val currentOnRendererTerminated = rememberUpdatedState(onRendererTerminated)
     val currentOnTextSelected = rememberUpdatedState(onTextSelected)
+    val currentOnLookupTouchDown = rememberUpdatedState(onLookupTouchDown)
+    val currentOnTextPrepared = rememberUpdatedState(onTextPrepared)
+    val currentOnLookupTouchAbandoned = rememberUpdatedState(onLookupTouchAbandoned)
     val currentOnSaveBookmark = rememberUpdatedState(onSaveBookmark)
     val currentOnContinuousPosition = rememberUpdatedState(onContinuousPosition)
     val currentOnClearLookupPopup = rememberUpdatedState(onClearLookupPopup)
@@ -309,8 +315,11 @@ internal fun ChapterWebView(
                 addJavascriptInterface(ReaderPageBridge(this, { currentRestoreToken.value },
                     { currentPageReporting.value }, { currentOnPageChanged.value(it) }), "HoshiReaderPage")
                 addJavascriptInterface(
-                    ReaderSelectionBridge(this) { selection, selectionRects ->
-                        if (acceptsReaderUpdates) currentOnTextSelected.value(selection, selectionRects)
+                    ReaderSelectionBridge(
+                        webView = this,
+                        onTextPrepared = { prepared -> if (acceptsReaderUpdates) currentOnTextPrepared.value(prepared) },
+                    ) { selected ->
+                        if (acceptsReaderUpdates) currentOnTextSelected.value(selected)
                     },
                     "HoshiTextSelection",
                 )
@@ -345,12 +354,30 @@ internal fun ChapterWebView(
                     ).source,
                 ) { result ->
                     val selectionResult = ReaderSelectionResult.fromWebViewResult(result)
+                    if (selectionResult.selectedNothing || selectionResult.isImageTap || selectionResult.isLinkTap || selectionResult.isTextTap) {
+                        // The tap selected no text after all, so a lookup prepared for it is not wanted.
+                        currentOnLookupTouchAbandoned.value()
+                    }
                     when {
                         selectionResult.isImageTap || selectionResult.isLinkTap -> Unit
                         selectionResult.isTextTap -> currentOnClearLookupPopup.value()
                         selectionResult.selectedNothing -> onBlankTap()
                     }
                 }
+            }
+            // The lookup starts while the finger is still down; the popup is shown once the tap is confirmed.
+            fun prepareAt(x: Float, y: Float) {
+                val token = currentOnLookupTouchDown.value() ?: return
+                val density = webView.resources.displayMetrics.density
+                webView.evaluateJavascript(
+                    ReaderSelectionCommand.PrepareText(
+                        x = androidPixelsToCssPixels(x, density),
+                        y = androidPixelsToCssPixels(y, density),
+                        maxLength = selectionScanLength,
+                        token = token,
+                    ).source,
+                    null,
+                )
             }
             fun shouldIgnoreReaderGestureEvent(event: MotionEvent): Boolean {
                 if (currentIsWebViewRestoring.value || webView.isNativeSelectionActive()) {
@@ -395,6 +422,10 @@ internal fun ChapterWebView(
                         ) {
                             override fun shouldIgnoreReaderGesture(event: MotionEvent): Boolean =
                                 shouldIgnoreReaderGestureEvent(event)
+
+                            override fun onDown(x: Float, y: Float) = prepareAt(x, y)
+
+                            override fun onTapAbandoned() = currentOnLookupTouchAbandoned.value()
 
                             override fun onTap(x: Float, y: Float) {
                                 selectAt(x, y) {

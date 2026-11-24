@@ -782,8 +782,9 @@ fun ReaderWebView(
         }
     }
     fun setLookupPopups(nextPopups: List<LookupPopupItem>) {
-        val supersededPending = lookupPopupDirectSync.pending != null
+        val supersededPending = lookupPopupDirectSync.pending != null || lookupPopupDirectSync.prepared != null
         lookupPopupDirectSync.pending = null
+        lookupPopupDirectSync.prepared = null
         val activeIds = nextPopups.mapTo(mutableSetOf()) { it.id }
         readerPopupHistories = readerPopupHistories.filterKeys(activeIds::contains)
         rootSelectionHighlight = rootSelectionHighlight?.takeIf { highlight ->
@@ -793,6 +794,19 @@ fun ReaderWebView(
         // The page was shown a popup that never reached the screen state, so it gets the real stack back.
         if (supersededPending) lookupPopupDirectSync.send(webView, nextPopups, rootSelectionHighlight)
     }
+    fun commitPendingRootLookup(pending: PendingRootLookup) {
+        if (lookupPopupDirectSync.pending !== pending) return
+        lookupPopupDirectSync.pending = null
+        rootSelectionHighlight = pending.highlight
+        setLookupPopups(listOf(pending.popup))
+    }
+    // A popup the page already shows joins the screen state before the stack is read or changed, so
+    // closing or extending it acts on the stack the user sees. The page then gets the resulting stack
+    // directly: the screen state can end up where it was before the lookup, which sends nothing.
+    fun settlePendingRootLookup() {
+        commitPendingRootLookup(lookupPopupDirectSync.pending ?: return)
+        webView?.post { lookupPopupDirectSync.send(webView, stateHolder.lookupPopups, rootSelectionHighlight) }
+    }
     fun dismissRootLookupPopup() {
         rootSelectionHighlight = null
         setLookupPopups(clearPopupSelectionHighlights(stateHolder.lookupPopups))
@@ -800,8 +814,9 @@ fun ReaderWebView(
         setLookupPopups(emptyList())
     }
     fun closeLookupPopupsAndSelection() {
+        settlePendingRootLookup()
         rootSelectionHighlight = null
-        if (lookupPopups.isNotEmpty()) {
+        if (stateHolder.lookupPopups.isNotEmpty()) {
             setLookupPopups(clearPopupSelectionHighlights(stateHolder.lookupPopups))
             clearReaderSelection()
             setLookupPopups(emptyList())
@@ -983,19 +998,17 @@ fun ReaderWebView(
             null,
         )
     }
-    fun popupIndex(popupId: String): Int =
-        stateHolder.lookupPopups.indexOfFirst { it.id == popupId }
+    // Used by the messages that change the popup stack.
+    fun popupIndex(popupId: String): Int {
+        settlePendingRootLookup()
+        return stateHolder.lookupPopups.indexOfFirst { it.id == popupId }
+    }
 
     fun popupById(popupId: String): LookupPopupItem? =
         stateHolder.lookupPopups.firstOrNull { it.id == popupId }
             ?: lookupPopupDirectSync.pending?.popup?.takeIf { it.id == popupId }
+            ?: lookupPopupDirectSync.prepared?.lookup?.popup?.takeIf { it.id == popupId }
 
-    fun commitPendingRootLookup(pending: PendingRootLookup) {
-        if (lookupPopupDirectSync.pending !== pending) return
-        lookupPopupDirectSync.pending = null
-        rootSelectionHighlight = pending.highlight
-        setLookupPopups(listOf(pending.popup))
-    }
     fun handleReaderPopupBridgeMessage(message: ReaderLookupPopupBridgeMessage) {
         when (message) {
             is ReaderLookupPopupBridgeMessage.OpenLink -> context.openPopupExternalLink(message.url)
@@ -1220,57 +1233,86 @@ fun ReaderWebView(
         }
     }
     readerPopupBridgeHolder.callbacks = ReaderLookupPopupBridgeCallbacks(::handleReaderPopupBridgeMessage)
-    val handleTextSelected: (ReaderSelectionData, (Int, (List<ReaderSelectionRect>) -> Unit) -> Unit) -> Unit = { selection, selectionRects ->
+    // Drops a lookup that was prepared for a touch which did not become a tap on that text. The page
+    // built its popup without showing it, so it gets the real stack back.
+    fun discardPreparedLookup() {
+        lookupPopupDirectSync.prepareToken++
+        if (lookupPopupDirectSync.prepared == null) return
+        lookupPopupDirectSync.prepared = null
+        lookupPopupDirectSync.send(webView, stateHolder.lookupPopups, rootSelectionHighlight)
+    }
+    // A finger touched the page. Returns the number the page has to report its selection under, or
+    // null when no lookup is prepared: a popup is open, and a tap then replaces or closes it.
+    fun beginLookupPreparation(): Int? {
+        discardPreparedLookup()
+        if (stateHolder.lookupPopups.isNotEmpty() || lookupPopupDirectSync.pending != null) return null
+        return lookupPopupDirectSync.prepareToken
+    }
+    // The page reported what a tap at the touched point would select. The lookup runs now and the page
+    // builds the popup out of sight, so a tap only has to show it.
+    val handleTextPrepared: (ReaderSelectionMessage) -> Unit = handler@{ prepared ->
+        val sync = lookupPopupDirectSync
+        if (prepared.token != sync.prepareToken || sync.prepared != null || sync.pending != null) return@handler
+        if (stateHolder.lookupPopups.isNotEmpty()) return@handler
+        val (popup, highlightCount) = lookupRootPopup(prepared.selection) ?: return@handler
+        val lookup = pendingRootLookup(popup, prepared.rects(highlightCount))
+        val held = PreparedRootLookup(prepared.selection, lookup, highlightCount)
+        sync.prepared = held
+        sync.send(webView, listOf(lookup.popup), lookup.highlight, rootPopupIsNew = true, revealHeld = true)
+        webView?.postDelayed({ if (sync.prepared === held) discardPreparedLookup() }, preparedRootLookupLifetimeMillis)
+    }
+    // The lookup prepared for this touch, if the tap selected the same text. Another one is discarded.
+    fun takePreparedLookup(selection: ReaderSelectionData): PreparedRootLookup? {
+        val prepared = lookupPopupDirectSync.prepared?.takeIf { it.selection == selection }
+        if (prepared == null) {
+            discardPreparedLookup()
+            return null
+        }
+        lookupPopupDirectSync.prepared = null
+        return prepared
+    }
+    val handleTextSelected: (ReaderSelectionMessage) -> Unit = { selected ->
+        val selection = selected.selection
         cancelReaderAutoPage()
         stateHolder.enterFocusModeForReaderInteraction()
-        val lookup = lookupRootPopup(selection)
+        val prepared = takePreparedLookup(selection)
+        val lookup = prepared?.let { it.lookup.popup to it.highlightCount } ?: lookupRootPopup(selection)
         if (lookup != null) {
             val (popup, highlightCount) = lookup
             pauseNarrationForLookupIfNeeded()
             val selectionCount = onTextSelected(selection) ?: highlightCount
-            // The page gets the popup right away. Updating the screen state rebuilds the reader screen,
-            // which keeps the main thread busy and delays the popup, so the state follows once the
-            // page reports the popup as revealed.
-            val pending = PendingRootLookup(popup, ReaderRootSelectionHighlight(popupId = popup.id, rects = null))
+            val built = prepared?.takeIf { it.highlightCount == selectionCount }?.lookup
+            // The page gets the popup and its highlight in one message, right away. Updating the
+            // screen state rebuilds the reader screen, which keeps the main thread busy and delays
+            // the popup, so the state follows once the page reports the popup as revealed.
+            val pending = built ?: pendingRootLookup(popup, selected.rects(selectionCount))
             lookupPopupDirectSync.pending = pending
-            lookupPopupDirectSync.send(webView, listOf(pending.popup), pending.highlight)
             webView?.postDelayed({ commitPendingRootLookup(pending) }, pendingRootLookupSafetyMillis)
-            selectionRects(selectionCount) { rects ->
-                val displayRects = rects.ifEmpty { listOf(popup.state.selection.rect) }
-                val anchor = displayRects.first()
-                val highlight = ReaderRootSelectionHighlight(popupId = popup.id, rects = displayRects)
-                fun anchored(existing: LookupPopupItem): LookupPopupItem =
-                    if (existing.id != popup.id) {
-                        existing
-                    } else {
-                        existing.copy(state = existing.state.copy(selection = existing.state.selection.copy(rect = anchor)))
-                    }
+            fun sendPending() {
                 if (lookupPopupDirectSync.pending === pending) {
-                    // The page can reveal the popup now, and reports back when it has.
-                    pending.popup = anchored(popup)
-                    pending.highlight = highlight
-                    lookupPopupDirectSync.send(webView, listOf(pending.popup), highlight)
-                } else if (stateHolder.lookupPopups.any { it.id == popup.id }) {
-                    setLookupPopups(stateHolder.lookupPopups.map(::anchored))
-                    rootSelectionHighlight = highlight
-                    lookupPopupDirectSync.send(webView, stateHolder.lookupPopups, rootSelectionHighlight)
+                    lookupPopupDirectSync.send(webView, listOf(pending.popup), pending.highlight, rootPopupIsNew = true)
                 }
+            }
+            if (built == null) {
+                sendPending()
+            } else {
+                // The page has built this popup already and only waits to be told to show it. Should
+                // it have lost the popup meanwhile, it gets it again.
+                webView?.evaluateJavascript(
+                    "!!window.hoshiReaderPopupHost?.releaseRootReveal(${readerJavaScriptStringLiteral(popup.id)})",
+                ) { released -> if (released != "true") sendPending() }
             }
         } else {
             rootSelectionHighlight = null
             setLookupPopups(emptyList())
             onTextSelected(selection)?.let { count ->
-                selectionRects(count) { rects ->
-                    rootSelectionHighlight = ReaderRootSelectionHighlight(
-                        popupId = null,
-                        rects = rects,
-                    )
-                }
+                rootSelectionHighlight = ReaderRootSelectionHighlight(popupId = null, rects = selected.rects(count))
             }
         }
     }
     fun handleReaderTapOutside() {
         cancelReaderAutoPage()
+        settlePendingRootLookup()
         if (stateHolder.lookupPopups.isEmpty()) {
             rootSelectionHighlight = null
             clearReaderSelection {
@@ -2186,7 +2228,11 @@ fun ReaderWebView(
                         verticalWriting = effectiveSettings.verticalWriting,
                     )
                 }
-                fun framePayloads(themedPopups: List<LookupPopupItem>, highlight: ReaderRootSelectionHighlight?) =
+                fun framePayloads(
+                    themedPopups: List<LookupPopupItem>,
+                    highlight: ReaderRootSelectionHighlight?,
+                    rootPopupIsNew: Boolean = false,
+                ) =
                     readerLookupPopupFramePayloads(
                         popups = themedPopups,
                         histories = readerPopupHistories,
@@ -2198,6 +2244,7 @@ fun ReaderWebView(
                         ttsWasPaused = ttsLookupPause.pending,
                         iframeUrl = readerPopupIframeUrl,
                         rootSelectionHighlight = highlight,
+                        rootPopupIsNew = rootPopupIsNew,
                     )
                 val readerRootSelectionHighlightPayload = remember(
                     rootSelectionHighlight,
@@ -2238,6 +2285,8 @@ fun ReaderWebView(
                             onReaderViewportSizeChanged = { size ->
                                 if (stateHolder.updateViewportSize(size)) {
                                     rootSelectionHighlight = null
+                                    lookupPopupDirectSync.pending = null
+                                    discardPreparedLookup()
                                 }
                             },
                             onPageChanged = { page ->
@@ -2313,6 +2362,9 @@ fun ReaderWebView(
                             sasayakiTextColor = currentSasayakiColors.textColor,
                             sasayakiBackgroundColor = currentSasayakiColors.backgroundColor,
                             onTextSelected = handleTextSelected,
+                            onLookupTouchDown = ::beginLookupPreparation,
+                            onTextPrepared = handleTextPrepared,
+                            onLookupTouchAbandoned = ::discardPreparedLookup,
                             onClearLookupPopup = ::closeLookupPopupsAndSelection,
                             onReaderTapOutside = ::handleReaderTapOutside,
                             onReaderInteraction = ::handleReaderInteraction,
@@ -2338,10 +2390,11 @@ fun ReaderWebView(
                     }
                 }
                 SideEffect {
-                    lookupPopupDirectSync.buildJson = { popups, highlight ->
+                    lookupPopupDirectSync.buildJson = { popups, highlight, rootPopupIsNew, revealHeld ->
                         ReaderLookupPopupStackPayload(
-                            popups = framePayloads(withPopupVisualOptions(popups), highlight),
+                            popups = framePayloads(withPopupVisualOptions(popups), highlight, rootPopupIsNew),
                             rootHighlight = rootHighlightPayload(highlight),
+                            rootRevealHeld = revealHeld,
                         ).toJson()
                     }
                 }

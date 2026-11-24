@@ -160,7 +160,9 @@
 
     function renderIframe(record) {
         syncIframeTheme(record);
-        record.iframe.contentWindow?.postMessage(iframeRenderMessage(record.payload), ORIGIN);
+        const message = iframeRenderMessage(record.payload);
+        if (rootRevealHeld && record.root) message.revealHeld = true;
+        record.iframe.contentWindow?.postMessage(message, ORIGIN);
     }
 
     function historyCount(payload, name) {
@@ -328,6 +330,24 @@
         if (first.done) return null;
         const record = first.value;
         return record?.root ? record : null;
+    }
+
+    // A lookup prepared while the finger is still down: the app sends the popup early and it is built
+    // out of sight until `releaseRootReveal` says the tap was confirmed.
+    let rootRevealHeld = false;
+
+    function releaseRootReveal(popupId) {
+        const record = activeRootRecord();
+        if (!record || record.payload?.id !== popupId) return false;
+        rootRevealHeld = false;
+        syncRootReveal();
+        return true;
+    }
+
+    // Shows the popup that was built for a touch, if one is waiting. The page calls this itself when
+    // the tap lands on the text the popup was prepared for.
+    function releaseHeldRootReveal() {
+        return rootRevealHeld && releaseRootReveal(activeRootRecord()?.payload?.id);
     }
 
     function rootHighlightBlocksReveal(record) {
@@ -583,15 +603,22 @@
         if (edges.left) appendRootHighlightEdge(item, 'hoshi-reader-selection-highlight-edge-left', 0, 0, lineSize, blockEnd, color);
     }
 
-    function renderRootHighlight(visible) {
+    function renderRootHighlight(visible, held = false) {
         if (!visible || !rootHighlight || rootHighlight.pending || !Array.isArray(rootHighlight.rects)) {
-            document.getElementById(LAYER_ID)
-                ?.querySelector('.hoshi-reader-selection-highlight-layer')
-                ?.replaceChildren();
+            const hidden = document.getElementById(LAYER_ID)?.querySelector('.hoshi-reader-selection-highlight-layer');
+            if (hidden) {
+                hidden.replaceChildren();
+                hidden.dataset.drawn = '';
+            }
             return;
         }
         const layer = ensureHighlightLayer();
         applyReaderHighlightClip(layer);
+        layer.dataset.held = String(held);
+        // Showing a highlight that was drawn ahead of a tap must not draw it again.
+        const drawn = JSON.stringify([rootHighlight.rects, !!rootHighlight.eInkMode, !!rootHighlight.darkMode]);
+        if (layer.dataset.drawn === drawn) return;
+        layer.dataset.drawn = drawn;
         layer.replaceChildren();
         const color = rootHighlight.eInkMode
             ? (rootHighlight.darkMode ? '#fff' : '#000')
@@ -623,19 +650,28 @@
         }
         const rootRecord = activeRootRecord();
         for (const record of frames.values()) {
-            setRevealReady(record, !rootHighlightBlocksReveal(record));
+            const blocked = rootHighlightBlocksReveal(record);
+            const held = rootRevealHeld && record.root && !blocked;
+            // A popup held for a touch is drawn at once but stays invisible, so that showing it on the
+            // tap costs no drawing.
+            record.shell.dataset.revealHeld = String(held);
+            setRevealReady(record, !blocked && !held);
         }
-        const highlightVisible = !!rootHighlight &&
+        const highlightKnown = !!rootHighlight &&
             !rootHighlight.pending &&
             Array.isArray(rootHighlight.rects) &&
-            rootHighlight.rects.length > 0 &&
-            (!rootRecord || (rootRecord.contentReady && rootRecord.revealReady));
-        renderRootHighlight(highlightVisible);
+            rootHighlight.rects.length > 0;
+        // The highlight appears with its popup, and is drawn out of sight with a held one.
+        renderRootHighlight(
+            highlightKnown && (!rootRecord || rootRecord.contentReady),
+            !!rootRecord && rootRevealHeld,
+        );
     }
 
     function renderStack(payload) {
         const items = Array.isArray(payload) ? payload : (payload?.popups || []);
         rootHighlight = Array.isArray(payload) ? null : (payload?.rootHighlight || null);
+        rootRevealHeld = !Array.isArray(payload) && payload?.rootRevealHeld === true;
         const activeIds = new Set(items.map(item => item.id));
         // Park the outgoing root before allocating the incoming root so it can reuse the loaded iframe.
         removeMissing(activeIds);
@@ -696,6 +732,16 @@
         };
     }
 
+    // A popup frame calls this as soon as its content is there. Its 'contentReady' message says the
+    // same, but the browser produces the next frame before it delivers a queued message, so waiting
+    // for the message reveals the popup a frame later.
+    function popupContentReady(popupId) {
+        const record = frames.get(popupId);
+        if (!record) return false;
+        setContentReady(record, true);
+        return true;
+    }
+
     window.addEventListener('message', function(event) {
         if (event.origin !== ORIGIN) return;
         const data = event.data || {};
@@ -741,6 +787,11 @@
             visibility: hidden;
             opacity: 0;
             pointer-events: none;
+            will-change: opacity;
+        }
+        #${LAYER_ID} .hoshi-reader-popup-shell[data-content-ready="true"][data-reveal-held="true"] {
+            visibility: visible;
+            opacity: 0.001;
         }
         #${LAYER_ID} .hoshi-reader-popup-shell[data-content-ready="true"][data-reveal-ready="true"] {
             visibility: visible;
@@ -752,6 +803,10 @@
             inset: 0;
             pointer-events: none;
             contain: layout style paint;
+            will-change: opacity;
+        }
+        #${LAYER_ID} .hoshi-reader-selection-highlight-layer[data-held="true"] {
+            opacity: 0.001;
         }
         #${LAYER_ID} .hoshi-reader-sasayaki-highlight-layer {
             position: fixed;
@@ -860,6 +915,9 @@
 
     window.hoshiReaderPopupHost = {
         renderStack,
+        popupContentReady,
+        releaseRootReveal,
+        releaseHeldRootReveal,
         resolveMessage,
         highlightSelection,
         navigateBack,

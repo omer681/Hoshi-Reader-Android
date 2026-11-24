@@ -4,62 +4,57 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import org.json.JSONArray
 
 internal class ReaderSelectionBridge(
     private val webView: WebView,
-    private val onTextSelected: (ReaderSelectionData, selectionRects: (Int, (List<ReaderSelectionRect>) -> Unit) -> Unit) -> Unit,
+    private val onTextPrepared: (ReaderSelectionMessage) -> Unit = {},
+    private val onTextSelected: (ReaderSelectionMessage) -> Unit,
 ) {
+    /** What a tap would select at the point a finger has just touched; nothing is selected yet. */
+    @JavascriptInterface
+    fun postPrepared(message: String) {
+        val prepared = ReaderSelectionBridgePayload.parse(message) ?: return
+        webView.post { onTextPrepared(prepared) }
+    }
+
     @JavascriptInterface
     fun postMessage(message: String) {
-        val data = ReaderSelectionBridgePayload.fromJson(message) ?: return
-        webView.post {
-            onTextSelected(data) { highlightCount, onRectsLoaded ->
-                webView.evaluateJavascript(ReaderSelectionCommand.SelectionRects(highlightCount).source) { result ->
-                    onRectsLoaded(ReaderSelectionBridgePayload.rectsFromJavascriptResult(result))
-                }
-            }
-        }
+        val selected = ReaderSelectionBridgePayload.parse(message) ?: return
+        webView.post { onTextSelected(selected) }
     }
+}
+
+/** A selection as the page reports it, with the rectangles that cover each number of its characters. */
+internal class ReaderSelectionMessage(
+    val selection: ReaderSelectionData,
+    private val rectsByLength: List<List<ReaderSelectionRect>>,
+    /** Names the touch a prepared selection belongs to; null for a selection made by a tap. */
+    val token: Int? = null,
+) {
+    /** The rectangles of the first [count] characters. */
+    fun rects(count: Int): List<ReaderSelectionRect> =
+        if (count <= 0 || rectsByLength.isEmpty()) emptyList() else rectsByLength[minOf(count, rectsByLength.size) - 1]
 }
 
 internal object ReaderSelectionBridgePayload {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun fromJson(message: String): ReaderSelectionData? {
-        val payload = runCatching { json.decodeFromString<Payload>(message) }.getOrNull() ?: return null
-        return ReaderSelectionData(
-            text = payload.text,
-            sentence = payload.sentence,
-            rect = ReaderSelectionRect(
-                x = payload.rect.x,
-                y = payload.rect.y,
-                width = payload.rect.width,
-                height = payload.rect.height,
-            ),
-            normalizedOffset = payload.normalizedOffset,
-            sentenceOffset = payload.sentenceOffset,
-            chapterIndex = payload.chapterIndex,
-        )
-    }
+    fun fromJson(message: String): ReaderSelectionData? = parse(message)?.selection
 
-    fun rectsFromJavascriptResult(result: String?): List<ReaderSelectionRect> {
-        val rectsJson = runCatching { json.decodeFromString<String>(result.orEmpty()) }.getOrNull()
-            ?: return emptyList()
-        val array = runCatching { JSONArray(rectsJson) }.getOrNull() ?: return emptyList()
-        return buildList {
-            for (index in 0 until array.length()) {
-                val rect = array.optJSONObject(index) ?: continue
-                add(
-                    ReaderSelectionRect(
-                        x = rect.optDouble("x"),
-                        y = rect.optDouble("y"),
-                        width = rect.optDouble("width"),
-                        height = rect.optDouble("height"),
-                    ),
-                )
-            }
-        }
+    fun parse(message: String): ReaderSelectionMessage? {
+        val payload = runCatching { json.decodeFromString<Payload>(message) }.getOrNull() ?: return null
+        return ReaderSelectionMessage(
+            selection = ReaderSelectionData(
+                text = payload.text,
+                sentence = payload.sentence,
+                rect = payload.rect.toSelectionRect(),
+                normalizedOffset = payload.normalizedOffset,
+                sentenceOffset = payload.sentenceOffset,
+                chapterIndex = payload.chapterIndex,
+            ),
+            rectsByLength = payload.rectsByLength.map { rects -> rects.map(Rect::toSelectionRect) },
+            token = payload.token,
+        )
     }
 
     @Serializable
@@ -70,6 +65,8 @@ internal object ReaderSelectionBridgePayload {
         val normalizedOffset: Int? = null,
         val sentenceOffset: Int? = null,
         val chapterIndex: Int? = null,
+        val rectsByLength: List<List<Rect>> = emptyList(),
+        val token: Int? = null,
     )
 
     @Serializable
@@ -78,7 +75,9 @@ internal object ReaderSelectionBridgePayload {
         val y: Double,
         val width: Double,
         val height: Double,
-    )
+    ) {
+        fun toSelectionRect() = ReaderSelectionRect(x = x, y = y, width = width, height = height)
+    }
 }
 
 @Serializable
