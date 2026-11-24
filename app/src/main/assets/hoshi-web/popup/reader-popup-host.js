@@ -7,6 +7,9 @@
     const HIGHLIGHT_INLINE_MERGE_TOLERANCE = 1;
     const frames = new Map();
     let idleRootRecord = null;
+    // A second parked root frame. Tapping another word while a popup is open needs a loaded frame for
+    // the new popup while the old one is still in use; loading a new frame delays the new popup.
+    let spareRootRecord = null;
     let rootHighlight = null;
     let sasayakiHighlight = null;
 
@@ -253,9 +256,10 @@
         let record = frames.get(payload.id);
         const previous = record?.payload;
         if (!record) {
-            if (isRoot && idleRootRecord) {
-                record = idleRootRecord;
-                idleRootRecord = null;
+            if (isRoot && (idleRootRecord || spareRootRecord)) {
+                record = idleRootRecord || spareRootRecord;
+                if (record === idleRootRecord) idleRootRecord = null;
+                else spareRootRecord = null;
             } else {
                 record = createRecord();
                 ensureLayer().appendChild(record.shell);
@@ -309,15 +313,25 @@
         record.shell.querySelectorAll('.hoshi-reader-popup-bar').forEach(node => node.remove());
         record.iframe.style.top = '0px';
         record.iframe.style.height = '100%';
-        idleRootRecord = record;
+    }
+
+    function retireRootRecord(record) {
+        if (!idleRootRecord || !spareRootRecord) {
+            parkRootRecord(record);
+            if (!idleRootRecord) idleRootRecord = record;
+            else spareRootRecord = record;
+        } else {
+            resetIframe(record);
+            record.shell.remove();
+        }
     }
 
     function removeMissing(activeIds) {
         for (const [id, record] of frames.entries()) {
             if (activeIds.has(id)) continue;
             frames.delete(id);
-            if (record.root && !idleRootRecord) {
-                parkRootRecord(record);
+            if (record.root) {
+                retireRootRecord(record);
             } else {
                 resetIframe(record);
                 record.shell.remove();
@@ -390,7 +404,7 @@
 
     function cleanupLayerIfIdle() {
         const layer = document.getElementById(LAYER_ID);
-        if (layer && frames.size === 0 && !idleRootRecord && !hasSasayakiHighlight()) {
+        if (layer && frames.size === 0 && !idleRootRecord && !spareRootRecord && !hasSasayakiHighlight()) {
             layer.remove();
         }
     }
@@ -673,9 +687,10 @@
         rootHighlight = Array.isArray(payload) ? null : (payload?.rootHighlight || null);
         rootRevealHeld = !Array.isArray(payload) && payload?.rootRevealHeld === true;
         const activeIds = new Set(items.map(item => item.id));
-        // Park the outgoing root before allocating the incoming root so it can reuse the loaded iframe.
-        removeMissing(activeIds);
+        // The incoming root takes a parked frame before the outgoing root is parked, so the new popup
+        // does not wait for the old one to be cleared.
         items.forEach((item, index) => renderPayload(item, index));
+        removeMissing(activeIds);
         cleanupLayerIfIdle();
         syncRootReveal();
     }

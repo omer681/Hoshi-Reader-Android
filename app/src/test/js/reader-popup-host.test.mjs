@@ -486,7 +486,7 @@ test('unmatched source submissions replace old entries and subsequent source-onl
     assert.equal(renders[2].entriesCount, 0);
 });
 
-test('a root lookup replaces its word in the loaded iframe and dismisses child frames', () => {
+test('a root lookup for another word renders in a second frame, parks the old one and dismisses child frames', () => {
     const { document, host } = popupHost();
     const root = rootPopupPayload();
     host.renderStack({ popups: [root, { ...root, id: 'child' }] });
@@ -499,14 +499,34 @@ test('a root lookup replaces its word in the loaded iframe and dismisses child f
     messages.length = 0;
 
     host.renderStack({ popups: [{ ...root, id: 'next-word' }] });
-    assert.deepEqual(iframes(), [rootIframe]);
-    assert.deepEqual(messages.map(message => message.type), ['resetPopup', 'renderPopup']);
-    assert.equal(messages.at(-1).popupId, 'next-word');
+    assert.equal(iframes().length, 2);
+    assert.ok(iframes().includes(rootIframe));
+    assert.ok(!iframes().includes(childIframe));
+    assert.deepEqual(messages.map(message => message.type), ['resetPopup']);
 
     host.renderStack({ popups: [] });
     host.renderStack({ popups: [{ ...root, id: 'reopened' }] });
-    assert.deepEqual(iframes(), [rootIframe]);
+    assert.equal(iframes().length, 2);
     assert.equal(messages.at(-1).popupId, 'reopened');
+});
+
+test('a popup for another word reuses a parked frame instead of loading a new one', () => {
+    const scene = popupHost();
+    const shells = () => scene.document.getElementById('hoshi-reader-popup-layer')?.children
+        .filter(child => child.className === 'hoshi-reader-popup-shell') ?? [];
+    const show = id => scene.host.renderStack({ popups: [{ ...rootPopupPayload(), id, contentKey: id }] });
+
+    show('first');
+    show('second');
+    assert.equal(shells().length, 2, 'the first switch loads a second frame');
+    scene.host.renderStack({ popups: [] });
+    assert.equal(shells().length, 2, 'both frames stay loaded once the popups close');
+
+    show('third');
+    show('fourth');
+    show('fifth');
+    assert.equal(shells().length, 2, 'later switches reuse the two frames');
+    assert.deepEqual(shells().map(shell => shell.dataset.popupId).sort(), ['', 'fifth']);
 });
 
 test('only the current popup and its iframe can update readiness or call native services', () => {

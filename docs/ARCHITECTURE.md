@@ -622,8 +622,10 @@ and copying an asset snapshot creates independent template caches.
   chapter-boundary `limit` result.
 - Reader, Dictionary and Process Text use the same iframe popup host and native
   service bridge. After reader restore, the popup host preloads the root iframe
-  for the current popup URL and reuses it across word changes and continuous
-  chapter boundaries. Nested popups have their own frames. Resetting a frame
+  for the current popup URL and reuses it across continuous chapter boundaries.
+  It keeps up to two loaded root frames, so a word change renders the new popup
+  in the other frame instead of waiting for the old one to be cleared. Nested
+  popups have their own frames. Resetting a frame
   settles its pending bridge requests with null. The host accepts messages for
   the active popup ID from its own frame, and the frame accepts replies for its
   current popup ID. The host signals the iframe once content and selection
