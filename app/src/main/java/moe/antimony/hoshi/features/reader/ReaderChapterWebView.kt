@@ -704,6 +704,9 @@ internal class HoshiReaderWebView(context: Context) : HoshiWebView(context) {
     }
     var onContinuousScroll: ((ReaderChapterPosition, Boolean) -> Unit)? = null
     var pendingContinuousSave: (() -> Unit)? = null
+
+    /** The page turn whose page has not been drawn yet, if any. */
+    var undrawnPageTurn: Long? by mutableStateOf(null)
     var continuousDocumentKey: ContinuousBookLayout? = null
     private var documentHasSelection = false
     private val nativeSelectionActivity = MutableStateFlow(false)
@@ -1392,9 +1395,18 @@ internal fun WebView.navigatePage(
     val documentToken = tag
     val requestId = nextReaderPageTurnProgressRequestId()
     readerPageTurnProgressRequestIds[this] = requestId
+    val view = this as? HoshiReaderWebView
+    val pageDrawn = { if (view?.undrawnPageTurn == requestId) view.undrawnPageTurn = null }
+    view?.undrawnPageTurn = requestId
+    postDelayed(pageDrawn, PAGE_TURN_DRAW_SAFETY_MILLIS)
     evaluateJavascript(ReaderPaginationScripts.paginateInvocation(direction)) { result ->
-        if (tag != documentToken) return@evaluateJavascript
         val navigationResult = ReaderPaginationScripts.navigationResult(result)
+        if (tag == documentToken && navigationResult == ReaderNavigationResult.Advanced) {
+            afterCurrentContentDrawn(pageDrawn)
+        } else {
+            pageDrawn()
+        }
+        if (tag != documentToken) return@evaluateJavascript
         // A later blocked/limit request cannot undo an actual turn's audio pause.
         if (navigationResult == ReaderNavigationResult.Advanced) onTurnAccepted()
         if (readerPageTurnProgressRequestIds[this] != requestId) return@evaluateJavascript
@@ -1413,6 +1425,9 @@ internal fun WebView.navigatePage(
         }
     }
 }
+
+/** A turn stops counting as undrawn after this long, should its page never be drawn or its result never come. */
+private const val PAGE_TURN_DRAW_SAFETY_MILLIS = 500L
 
 private fun nextReaderPageTurnProgressRequestId(): Long {
     readerPageTurnProgressRequestId += 1
