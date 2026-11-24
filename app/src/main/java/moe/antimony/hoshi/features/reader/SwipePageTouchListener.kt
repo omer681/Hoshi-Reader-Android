@@ -3,6 +3,7 @@ package moe.antimony.hoshi.features.reader
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
+import kotlin.math.max
 
 abstract class SwipePageTouchListener(
     swipeDistance: Float = DEFAULT_SWIPE_DISTANCE,
@@ -17,6 +18,9 @@ abstract class SwipePageTouchListener(
         } else {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    // The finger's moves arrive as they are read, not with the next frame, so a swipe
+                    // is seen before the work prepared for a tap gets in the way of the page turn.
+                    view.requestUnbufferedDispatch(event)
                     tracker.onDown(event.x, event.y, event.eventTime)
                     onDown(event.x, event.y)
                 }
@@ -68,7 +72,8 @@ internal class ReaderSwipeGestureTracker(
     /**
      * Whether the touch that is down can still end as a tap close to where it began. This ends
      * sooner than [onUp] gives up on a tap: [TAP_SLOP] forgives a finger that drifts, while work
-     * prepared for the tap belongs to the point that was touched.
+     * prepared for the tap belongs to the point that was touched. A finger that sets off at swipe
+     * speed ends it at once, before that work can delay the page turn.
      */
     var tapStillLikely = false
         private set
@@ -86,9 +91,12 @@ internal class ReaderSwipeGestureTracker(
         if (!hasDown) return Result.None
         val dx = x - downX
         val dy = y - downY
-        if (abs(dx) > TAP_PREPARATION_SLOP || abs(dy) > TAP_PREPARATION_SLOP) tapStillLikely = false
-        if (swipeDispatched || minDistance <= 0f) return Result.None
         val elapsedMs = (eventTime - downTime).coerceAtLeast(1L)
+        val travelled = max(abs(dx), abs(dy))
+        val atSwipeSpeed = travelled >= TAP_PREPARATION_FAST_SLOP &&
+            travelled * 1_000f / elapsedMs >= MIN_FAST_FLICK_VELOCITY_PX_PER_SECOND
+        if (travelled > TAP_PREPARATION_SLOP || atSwipeSpeed) tapStillLikely = false
+        if (swipeDispatched || minDistance <= 0f) return Result.None
         val velocityX = abs(dx) * 1_000f / elapsedMs
         val hasPageDistance = abs(dx) >= minDistance
         val hasFastFlickDistance = abs(dx) >= minDistance / 2f &&
@@ -149,6 +157,7 @@ internal class ReaderSwipeGestureTracker(
         const val MAX_TAP_DURATION_MS = 500L
         private const val TAP_SLOP = 72f
         private const val TAP_PREPARATION_SLOP = 24f
+        private const val TAP_PREPARATION_FAST_SLOP = 12f
         private const val MIN_FAST_FLICK_VELOCITY_PX_PER_SECOND = 900f
         private const val MAX_EARLY_SWIPE_DURATION_MS = 300L
         private const val MIN_EARLY_SWIPE_VELOCITY_PX_PER_SECOND = 360f

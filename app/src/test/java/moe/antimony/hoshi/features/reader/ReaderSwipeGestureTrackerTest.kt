@@ -189,6 +189,21 @@ class ReaderSwipeGestureTrackerTest {
     }
 
     @Test
+    fun touchStopsBeingALikelyTapAsSoonAsItMovesAtSwipeSpeed() {
+        val swiping = ReaderSwipeGestureTracker(minDistance = 72f)
+        swiping.onDown(240f, 100f, eventTime = 1_000L)
+        assertTrue(swiping.onMove(254f, 100f, eventTime = 1_008L) == ReaderSwipeGestureTracker.Result.None)
+        assertTrue(!swiping.tapStillLikely)
+
+        val settling = ReaderSwipeGestureTracker(minDistance = 72f)
+        settling.onDown(240f, 100f, eventTime = 1_000L)
+        settling.onMove(248f, 100f, eventTime = 1_008L)
+        assertTrue(settling.tapStillLikely)
+        settling.onMove(254f, 100f, eventTime = 1_040L)
+        assertTrue(settling.tapStillLikely)
+    }
+
+    @Test
     fun touchStopsBeingALikelyTapWhenItSwipesIsCancelledOrGainsAPointer() {
         val swiped = ReaderSwipeGestureTracker(minDistance = 20f)
         swiped.onDown(240f, 100f, eventTime = 1_000L)
